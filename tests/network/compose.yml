@@ -1,0 +1,56 @@
+services:
+  router:
+    build:
+      context: ../..
+      target: network-test
+    command: ["--config", "/etc/localname/config.toml", "serve"]
+    volumes:
+      - ./router.toml:/etc/localname/config.toml:ro
+    networks:
+      lan:
+        ipv4_address: 10.53.0.1
+    read_only: true
+    tmpfs:
+      - /etc/localname:uid=10001,gid=10001
+  server:
+    build:
+      context: ../..
+      target: network-test
+    command: ["--config", "/etc/localname/config.toml", "serve"]
+    volumes:
+      - ./server.toml:/etc/localname/config.toml:ro
+    networks:
+      lan:
+        ipv4_address: 10.53.0.2
+    read_only: true
+    tmpfs:
+      - /etc/localname:uid=10001,gid=10001
+  upstream:
+    build:
+      context: ../..
+      target: network-test
+    command: ["--config", "/etc/localname/config.toml", "serve"]
+    volumes:
+      - ./upstream.toml:/etc/localname/config.toml:ro
+    networks:
+      lan:
+        ipv4_address: 10.53.0.3
+    read_only: true
+    tmpfs:
+      - /etc/localname:uid=10001,gid=10001
+  client:
+    build:
+      context: ../..
+      target: network-test
+    entrypoint: ["network-probe"]
+    environment:
+      LOCALNAME_TEST_SERVER: 10.53.0.1:5354
+    depends_on: [router, server, upstream]
+    networks: [lan]
+networks:
+  lan:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.53.0.0/24
+          gateway: 10.53.0.254

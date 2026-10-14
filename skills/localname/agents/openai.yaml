@@ -1,0 +1,4 @@
+interface:
+  display_name: "Localname"
+  short_description: "Configure and diagnose friendly LAN device names"
+  default_prompt: "Use $localname to inspect my local DNS setup and add a device name with verification."

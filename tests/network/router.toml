@@ -1,0 +1,4 @@
+zone = "router.home.arpa"
+listen = ["10.53.0.1:5354"]
+upstreams = ["10.53.0.2:5354"]
+allowed_clients = ["10.53.0.0/24"]

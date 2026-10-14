@@ -1,0 +1,8 @@
+zone = "external.test"
+listen = ["10.53.0.3:5354"]
+upstreams = ["9.9.9.9:53"]
+allowed_clients = ["10.53.0.0/24"]
+[[records]]
+name = "remote"
+value = "203.0.113.8"
+ttl = 60

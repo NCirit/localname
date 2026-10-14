@@ -1,0 +1,6 @@
+/target/
+/.milstone/
+*.lock
+!Cargo.lock
+*.tmp
+.DS_Store

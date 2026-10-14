@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:localname:output:v1",
+  "title": "Localname CLI output version 1",
+  "type": "object",
+  "required": ["schema_version", "command", "ok", "changed", "revision", "data", "warnings", "verification", "rollback", "next_actions", "error"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "command": {"type": "string"},
+    "ok": {"type": "boolean"},
+    "changed": {"type": "boolean"},
+    "revision": {"type": ["integer", "null"], "minimum": 0},
+    "data": {},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "verification": {"type": ["object", "null"]},
+    "rollback": {"type": ["string", "null"]},
+    "next_actions": {"type": "array", "items": {"type": "string"}},
+    "error": {
+      "type": ["object", "null"],
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": ["INVALID_INPUT", "PERMISSION_REQUIRED", "CONFLICT", "UNAVAILABLE", "INTERNAL_ERROR"]},
+        "message": {"type": "string"}
+      }
+    }
+  }
+}
