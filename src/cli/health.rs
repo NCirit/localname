@@ -229,7 +229,7 @@ pub async fn resolve(output: OutputFormat, store: &ConfigStore, args: ResolveArg
     } else {
         store.load()?
     };
-    let name = config.fqdn(&args.name)?;
+    let name = config.query_name(&args.name)?;
     let server = args.server.unwrap_or_else(|| first_listener(&config));
     let result = query_server(
         server,

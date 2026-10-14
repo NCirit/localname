@@ -183,6 +183,14 @@ impl Config {
             }
         }
 
+        for (name, target) in &cname_targets {
+            if name_in_zone(target, &zone) && !by_name.contains_key(*target) {
+                bail!(
+                    "alias {name} points to {target}, which is not a configured name; end external targets with a dot (for example tv.example.com.)"
+                );
+            }
+        }
+
         let mut service_names = HashSet::new();
         for service in &mut self.services {
             service.name = canonical_name(&service.name, &zone)?;
@@ -195,6 +203,10 @@ impl Config {
 
     pub fn fqdn(&self, name: &str) -> Result<String> {
         canonical_name(name, &self.zone)
+    }
+
+    pub fn query_name(&self, name: &str) -> Result<String> {
+        query_name(name, &self.zone)
     }
 }
 
@@ -237,18 +249,35 @@ pub fn canonical_zone(zone: &str) -> Result<String> {
     Ok(format!("{value}."))
 }
 
+/// Expand a record name or alias target with zone-file semantics: a trailing dot or the
+/// zone suffix makes a name absolute; anything else is relative to `zone`.
 pub fn canonical_name(name: &str, zone: &str) -> Result<String> {
-    let value = name.trim().trim_end_matches('.').to_ascii_lowercase();
-    if value.is_empty() {
+    let value = name.trim().to_ascii_lowercase();
+    let zone = zone.trim_end_matches('.');
+    let absolute = if let Some(stripped) = value.strip_suffix('.') {
+        stripped.to_owned()
+    } else if value == zone || value.ends_with(&format!(".{zone}")) {
+        value
+    } else if value.is_empty() {
+        String::new()
+    } else {
+        format!("{value}.{zone}")
+    };
+    if absolute.is_empty() {
         bail!("invalid DNS name: name cannot be empty");
     }
-    let absolute = if value.contains('.') {
-        value
-    } else {
-        format!("{value}.{}", zone.trim_end_matches('.'))
-    };
     validate_labels(&absolute)?;
     Ok(format!("{absolute}."))
+}
+
+/// Expand a name to query: single labels are relative to `zone`; dotted names are absolute.
+pub fn query_name(name: &str, zone: &str) -> Result<String> {
+    let value = name.trim().trim_end_matches('.');
+    if value.contains('.') {
+        canonical_name(&format!("{value}."), zone)
+    } else {
+        canonical_name(value, zone)
+    }
 }
 
 fn validate_labels(value: &str) -> Result<()> {
@@ -524,6 +553,44 @@ mod tests {
             canonical_name("NAS", "home.arpa.").unwrap(),
             "nas.home.arpa."
         );
+    }
+
+    #[test]
+    fn record_names_use_zone_file_semantics() {
+        for (input, expected) in [
+            ("printer.office", "printer.office.home.arpa."),
+            ("nas.home.arpa", "nas.home.arpa."),
+            ("home.arpa", "home.arpa."),
+            ("tv.example.com.", "tv.example.com."),
+            ("nas.home.arpa.", "nas.home.arpa."),
+        ] {
+            assert_eq!(
+                canonical_name(input, "home.arpa.").unwrap(),
+                expected,
+                "{input}"
+            );
+        }
+        assert!(canonical_name("", "home.arpa.").is_err());
+        assert!(canonical_name(".", "home.arpa.").is_err());
+        assert_eq!(
+            query_name("example.com", "home.arpa.").unwrap(),
+            "example.com."
+        );
+        assert_eq!(query_name("nas", "home.arpa.").unwrap(), "nas.home.arpa.");
+    }
+
+    #[test]
+    fn rejects_dangling_local_alias_but_allows_external_targets() {
+        let alias = |target: &str| Config {
+            records: vec![RecordConfig {
+                name: "files".into(),
+                value: target.into(),
+                ttl: 60,
+            }],
+            ..Config::default()
+        };
+        assert!(alias("missing").validate().is_err());
+        assert!(alias("tv.example.com.").validate().is_ok());
     }
 
     #[test]

@@ -280,13 +280,13 @@ where
             body: Request::Status,
             ..
         }) => Response {
-            status: Some(server.daemon_status().await),
+            status: Some(server.daemon_status()),
             ..Response::default()
         },
         Ok(frame) => {
             let request_store = server.store().clone();
             match tokio::task::spawn_blocking(move || apply(&request_store, frame.body)).await? {
-                Ok(config) => match server.install(&config).await {
+                Ok(config) => match server.install(&config) {
                     Ok(()) => Response {
                         config: Some(config),
                         ..Response::default()

@@ -1,0 +1,149 @@
+# DNS behavior contract (decision 17). Each case runs over UDP and TCP against a live server.
+# `rcode` is the hickory response-code name; `answers` lists expected "TYPE value" pairs in order.
+
+[config]
+zone = "home.arpa"
+upstreams = ["192.0.2.1:53"]  # public TEST-NET address that never answers
+upstream_timeout_ms = 200
+records = [
+    { name = "nas", value = "192.168.1.20" },
+    { name = "nas", value = "fd00::20" },
+    { name = "storage", value = "nas" },
+    { name = "backup", value = "storage" },
+    { name = "printer.office", value = "192.168.1.30" },
+    { name = "multi", value = "10.0.0.1" },
+    { name = "multi", value = "10.0.0.2" },
+]
+
+[[case]]
+about = "positive A answer is authoritative"
+name = "nas.home.arpa."
+type = "A"
+rcode = "NoError"
+aa = true
+answers = ["A 192.168.1.20"]
+
+[[case]]
+about = "names are case-insensitive"
+name = "NaS.HoMe.ArPa."
+type = "A"
+rcode = "NoError"
+aa = true
+answers = ["A 192.168.1.20"]
+
+[[case]]
+about = "positive AAAA answer"
+name = "nas.home.arpa."
+type = "AAAA"
+rcode = "NoError"
+aa = true
+answers = ["AAAA fd00::20"]
+
+[[case]]
+about = "CNAME chains are followed to the final address"
+name = "backup.home.arpa."
+type = "A"
+rcode = "NoError"
+aa = true
+answers = ["CNAME storage.home.arpa.", "CNAME nas.home.arpa.", "A 192.168.1.20"]
+
+[[case]]
+about = "a CNAME query returns only the alias"
+name = "storage.home.arpa."
+type = "CNAME"
+rcode = "NoError"
+aa = true
+answers = ["CNAME nas.home.arpa."]
+
+[[case]]
+about = "multiple addresses are all returned"
+name = "multi.home.arpa."
+type = "A"
+rcode = "NoError"
+aa = true
+answers = ["A 10.0.0.1", "A 10.0.0.2"]
+
+[[case]]
+about = "existing name without the requested type is NODATA with SOA"
+name = "printer.office.home.arpa."
+type = "AAAA"
+rcode = "NoError"
+aa = true
+answers = []
+soa_authority = true
+
+[[case]]
+about = "empty non-terminal is NODATA, not NXDOMAIN (RFC 8020)"
+name = "office.home.arpa."
+type = "A"
+rcode = "NoError"
+aa = true
+answers = []
+soa_authority = true
+
+[[case]]
+about = "unknown local name is NXDOMAIN with SOA and is never forwarded"
+name = "missing.home.arpa."
+type = "A"
+rcode = "NXDomain"
+aa = true
+answers = []
+soa_authority = true
+
+[[case]]
+about = "zone apex SOA carries the revision as serial"
+name = "home.arpa."
+type = "SOA"
+rcode = "NoError"
+aa = true
+answers = ["SOA ns1.home.arpa. hostmaster.home.arpa. 0 3600 600 86400 60"]
+
+[[case]]
+about = "IPv4 reverse lookup"
+name = "20.1.168.192.in-addr.arpa."
+type = "PTR"
+rcode = "NoError"
+aa = true
+answers = ["PTR nas.home.arpa."]
+
+[[case]]
+about = "IPv6 reverse lookup"
+name = "0.2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa."
+type = "PTR"
+rcode = "NoError"
+aa = true
+answers = ["PTR nas.home.arpa."]
+
+[[case]]
+about = "unconfigured private reverse names are answered locally (RFC 6303)"
+name = "99.1.168.192.in-addr.arpa."
+type = "PTR"
+rcode = "NXDomain"
+aa = true
+answers = []
+soa_authority = true
+
+[[case]]
+about = "localhost resolves to loopback without forwarding (RFC 6761)"
+name = "localhost."
+type = "A"
+rcode = "NoError"
+aa = true
+answers = ["A 127.0.0.1"]
+
+[[case]]
+about = "invalid. never exists"
+name = "anything.invalid."
+type = "A"
+rcode = "NXDomain"
+aa = true
+answers = []
+soa_authority = true
+
+[[case]]
+about = "upstream failure becomes SERVFAIL without affecting local answers"
+name = "example.com."
+type = "A"
+rcode = "ServFail"
+aa = false
+answers = []

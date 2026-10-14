@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use hickory_proto::rr::RecordType;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -53,7 +53,7 @@ enum Command {
     /// Inspect the host and create or verify a safe DNS setup.
     Setup(setup::SetupArgs),
     /// Run the DNS service.
-    Serve,
+    Serve(ServeArgs),
     /// Show service and resolution health.
     Status {
         /// Exit unsuccessfully unless the configured DNS listener is healthy.
@@ -79,6 +79,14 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    /// Bind listeners, then permanently switch to this account before reading client data
+    /// (Unix; requires starting as root). The configuration directory must be writable by it.
+    #[arg(long)]
+    user: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -125,8 +133,33 @@ pub(crate) struct VerificationError {
 }
 
 /// Parse arguments, run the command, and render errors in the selected format.
-pub async fn run() -> ExitCode {
+pub fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The service gets a small worker pool; one-shot commands need only one thread.
+    let runtime = if matches!(cli.command, Command::Serve(_)) {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(
+                std::thread::available_parallelism()
+                    .map_or(2, std::num::NonZero::get)
+                    .clamp(2, 4),
+            )
+            .enable_all()
+            .build()
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    };
+    match runtime {
+        Ok(runtime) => runtime.block_on(run(cli)),
+        Err(error) => {
+            eprintln!("localname: failed to start runtime: {error}");
+            ExitCode::from(ErrorCode::Internal.exit_code())
+        }
+    }
+}
+
+async fn run(cli: Cli) -> ExitCode {
     let output = cli.output;
     init_tracing(matches!(cli.output, OutputFormat::Json));
     let path = cli.config.clone().unwrap_or_else(default_config_path);
@@ -220,7 +253,7 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
             )
         }
         Command::Setup(args) => setup::setup(output, &store, &args),
-        Command::Serve => serve(store).await,
+        Command::Serve(args) => serve(store, args).await,
         Command::Status { check } => health::status(output, &store, check).await,
         Command::Diagnose => health::diagnose(output, &store).await,
         Command::Resolve(args) => health::resolve(output, &store, args).await,
@@ -250,8 +283,17 @@ pub fn command_reference() -> Vec<Value> {
     references
 }
 
-async fn serve(store: ConfigStore) -> Result<()> {
+async fn serve(store: ConfigStore, args: ServeArgs) -> Result<()> {
     let config = store.load()?;
+    let listeners = crate::Listeners::bind(&config.listen).await?;
+    if let Some(user) = &args.user {
+        crate::privilege::drop_to(user)?;
+        tracing::info!(%user, "dropped root privileges after binding listeners");
+    } else if crate::privilege::is_root() {
+        tracing::warn!(
+            "running as root; use --user, a service account with CAP_NET_BIND_SERVICE, or an unprivileged port"
+        );
+    }
     let server = DnsServer::new(store, config)?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -272,7 +314,7 @@ async fn serve(store: ConfigStore) -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = shutdown_tx.send(true);
     });
-    server.run(shutdown_rx).await
+    server.run_with(listeners, shutdown_rx).await
 }
 
 fn config_command(output: OutputFormat, store: &ConfigStore, command: ConfigCommand) -> Result<()> {

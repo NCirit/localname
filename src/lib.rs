@@ -5,6 +5,9 @@ pub mod dns;
 pub mod error;
 pub mod integration;
 pub mod output;
+pub mod privilege;
 
 pub use config::{Config, ConfigStore, RecordConfig, ServiceConfig};
-pub use dns::{DnsServer, DnsSnapshot, QueryResult, query_server};
+pub use dns::{
+    DnsServer, DnsSnapshot, Listeners, QueryResult, Transport, query_server, query_with,
+};

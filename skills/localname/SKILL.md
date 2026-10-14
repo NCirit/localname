@@ -17,7 +17,7 @@ Use the same `--config PATH` on every command when the user selects a configurat
 4. When the daemon is running, the command reads the change back itself: `verification.status` is `passed` only when the listener's SOA serial equals the new revision and the record resolves (or no longer resolves). `not_running` means only the configuration changed. Exit code 7 / `VERIFICATION_FAILED` means the change was committed but not observed; report it and offer the returned `rollback` command.
 5. Report the fully qualified name, resulting revision, verification scope, and the returned rollback command, preserving the selected configuration path.
 
-Short names expand beneath the configured zone (`home.arpa` by default); read the zone from status rather than assuming it for existing installations. `add NAME TARGET` also supports aliases to another configured local name. Use an IP address rather than a port-bearing URL for device records.
+Short names expand beneath the configured zone (`home.arpa` by default); read the zone from status rather than assuming it for existing installations. `add NAME TARGET` also supports aliases: a local target must already exist, and an external target needs a trailing dot (`tv.example.com.`). Dotted names without a trailing dot are relative to the zone (`printer.office` → `printer.office.home.arpa.`). Use an IP address rather than a port-bearing URL for device records.
 
 `localname rollback N` restores the contents of revision N as a new revision. It restores the whole configuration rather than one record, so list candidates with `localname revisions --output json`, preview with `localname rollback N --dry-run --output json` (it reports `records_added` and `records_removed`), then apply with `--expect-revision CURRENT`.
 

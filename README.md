@@ -39,6 +39,10 @@ Set your router's LAN/DHCP DNS server to `LOCALNAME_LAN_IP`, then reconnect a se
 
 The CLI supports IPv4/IPv6 address records, local aliases, reverse lookup, upstream forwarding, bounded caching, live record reload, previews, and revision rollback. Use `--config PATH` to select a configuration file and `--output json` for automation.
 
+Names follow zone-file rules: `printer.office` means `printer.office.home.arpa`, and a trailing dot marks a name outside the zone, so an alias to an external host is written `localname add tv roku.example.com.`. Aliases to local names must point at a name that exists.
+
+localname answers `localhost`, `invalid`, and private reverse lookups (`192.168.x.x`, `10.x.x.x`, ULA and link-local IPv6) itself and never sends them, `home.arpa`, or `.local` names to public resolvers; when an upstream is on your LAN (such as the router), those queries go only to it.
+
 To choose a different namespace during first setup, use `localname setup --zone dev.test --local --apply` for a development instance, or provide a domain you control for home-network setup. Short names are expanded under the configured zone.
 
 ```console
@@ -57,16 +61,20 @@ While the server runs, record changes go through its local control endpoint: an 
 
 Agents can use the bundled `skills/localname` skill. `localname skill --output json` returns the version-matched instructions, a generated reference for every command, and the output schema. `localname schema` prints the schema separately.
 
+To serve port 53 without running as root, either grant the binary the bind capability (`sudo setcap cap_net_bind_service=+ep "$(command -v localname)"`), or start it as root with `localname serve --user localname`: it binds its listeners, then permanently switches to that account before reading any query. The configuration directory must be writable by that account.
+
 Development checks:
 
 ```console
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
-cargo run --release --example benchmark
+cargo build --release && cargo run --release --example benchmark
 ```
 
-The benchmark uses 10,000 records and 20,000 UDP queries, paced at 10,000 queries/second by default. Set `LOCALNAME_BENCH_RATE=0` for a throughput run. Results describe the machine where the test runs; they are not a guarantee for every router or host.
+The benchmark starts the release binary as a separate server with 10,000 records and sends 20,000 UDP queries paced at 10,000 queries/second. Set `LOCALNAME_BENCH_RATE=0` for a throughput run. CI enforces these budgets on x86-64 and ARM64: p99 at most 5 ms, server memory at most 64 MiB, release binary at most 10 MiB. Results describe the machine where the test runs; they are not a guarantee for every router or host.
+
+DNS behavior is pinned by `tests/fixtures/conformance.toml`, which runs every case over UDP and TCP.
 
 This is an early development release. Automated router configuration, operating-system DNS integration, service proxying, and trusted HTTPS are still being implemented.
 

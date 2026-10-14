@@ -30,6 +30,29 @@ async fn main() -> anyhow::Result<()> {
             "container bootstrap did not produce a healthy DNS service"
         );
     }
+    if let Ok(address) = std::env::var("LOCALNAME_TEST_PRIVILEGED") {
+        let address: SocketAddr = address.parse()?;
+        let mut ready = false;
+        for _ in 0..30 {
+            if let Ok(answer) = query_server(
+                address,
+                "nas.home.arpa.",
+                RecordType::A,
+                Duration::from_secs(1),
+            )
+            .await
+                && answer
+                    .answers
+                    .iter()
+                    .any(|record| record.contains("192.168.1.20"))
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        anyhow::ensure!(ready, "privilege-dropped port 53 listener did not answer");
+    }
     for _ in 0..30 {
         if let Ok(answer) = query_server(
             server,

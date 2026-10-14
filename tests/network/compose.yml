@@ -38,6 +38,41 @@ services:
     read_only: true
     tmpfs:
       - /etc/localname:uid=10001,gid=10001
+  privileged:
+    # Starts as root with only the capabilities needed to bind port 53 and switch user.
+    # Healthy only when the daemon (PID 1) runs as the unprivileged localname account.
+    build:
+      context: ../..
+      target: network-test
+    user: "0"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cp /fixture/config.toml /etc/localname/config.toml
+        chown 10001:10001 /etc/localname/config.toml
+        exec localname --config /etc/localname/config.toml serve --user localname
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          u=$$(id -u localname); g=$$(id -g localname);
+          [ "$$(awk '/^Uid:/ {print $$2, $$3, $$4, $$5}' /proc/1/status)" = "$$u $$u $$u $$u" ] &&
+          [ "$$(awk '/^Gid:/ {print $$2, $$3, $$4, $$5}' /proc/1/status)" = "$$g $$g $$g $$g" ] &&
+          [ "$$u" != 0 ] && [ "$$g" != 0 ]
+      interval: 1s
+      retries: 30
+    volumes:
+      - ./privileged.toml:/fixture/config.toml:ro
+    read_only: true
+    tmpfs:
+      - /etc/localname:uid=10001,gid=10001
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]
+    security_opt: [no-new-privileges:true]
+    networks:
+      lan:
+        ipv4_address: 10.53.0.4
   client:
     build:
       context: ../..
@@ -46,7 +81,13 @@ services:
     environment:
       LOCALNAME_TEST_SERVER: 10.53.0.1:5354
       LOCALNAME_TEST_BOOTSTRAP: 10.53.0.10:5354
-    depends_on: [router, server, upstream, bootstrap]
+      LOCALNAME_TEST_PRIVILEGED: 10.53.0.4:53
+    depends_on:
+      router: {condition: service_started}
+      server: {condition: service_started}
+      upstream: {condition: service_started}
+      bootstrap: {condition: service_started}
+      privileged: {condition: service_healthy}
     networks: [lan]
   bootstrap:
     build:

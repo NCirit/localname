@@ -39,3 +39,27 @@ jobs:
       - run: docker compose -p localname-test -f tests/network/compose.yml up --build --abort-on-container-exit --exit-code-from client
       - if: always()
         run: docker compose -p localname-test -f tests/network/compose.yml down --volumes
+  benchmark:
+    # Performance budgets (see README): local answers p99 <= 5 ms at a paced 10k queries/s
+    # with 10k records, server RSS <= 64 MiB, release binary <= 10 MiB, zero errors.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release --bin localname --example benchmark
+      - name: Binary size budget
+        run: test "$(stat -c %s target/release/localname)" -le 10485760
+      - name: Latency and memory budget
+        env:
+          LOCALNAME_BENCH_BUDGET_P99_MS: "5"
+          LOCALNAME_BENCH_BUDGET_RSS_MB: "64"
+        run: target/release/examples/benchmark | tee "benchmark-${{ runner.arch }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-${{ runner.arch }}
+          path: benchmark-*.json
