@@ -1,6 +1,8 @@
+pub mod cli;
 pub mod config;
 pub mod control;
 pub mod dns;
+pub mod error;
 pub mod integration;
 pub mod output;
 

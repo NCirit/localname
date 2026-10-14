@@ -36,6 +36,7 @@ const MAX_TCP_PACKET: usize = u16::MAX as usize;
 
 #[derive(Clone)]
 pub struct DnsSnapshot {
+    revision: u64,
     zone_text: String,
     records: HashMap<(String, RecordType), Vec<Record>>,
     known_names: HashSet<String>,
@@ -79,6 +80,7 @@ impl DnsSnapshot {
             )),
         );
         Ok(Self {
+            revision: config.revision,
             zone_text: config.zone.clone(),
             records,
             known_names,
@@ -172,7 +174,7 @@ struct Metrics {
     errors: AtomicU64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct MetricsSnapshot {
     pub queries: u64,
     pub local: u64,
@@ -406,6 +408,8 @@ fn validate_response(request: &Message, response: &Message) -> Result<()> {
 }
 
 pub struct DnsServer {
+    _daemon_lock: std::fs::File,
+    started: Instant,
     config_store: ConfigStore,
     config: Config,
     snapshot: Arc<ArcSwap<DnsSnapshot>>,
@@ -416,10 +420,16 @@ pub struct DnsServer {
 
 impl DnsServer {
     pub fn new(config_store: ConfigStore, mut config: Config) -> Result<Self> {
+        let daemon_lock = config_store.acquire_daemon_lock()?;
+        if config_store.exists() {
+            config = config_store.load()?;
+        }
         config.validate()?;
         let snapshot = Arc::new(DnsSnapshot::from_config(&config)?);
         let metrics = Arc::new(Metrics::default());
         Ok(Self {
+            _daemon_lock: daemon_lock,
+            started: Instant::now(),
             config_store,
             config,
             snapshot: Arc::new(ArcSwap::from(snapshot)),
@@ -431,6 +441,29 @@ impl DnsServer {
 
     pub fn metrics(&self) -> MetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    pub(crate) fn store(&self) -> &ConfigStore {
+        &self.config_store
+    }
+
+    /// Atomically publish a committed configuration to the query path.
+    pub(crate) async fn install(&self, config: &Config) -> Result<()> {
+        let snapshot = DnsSnapshot::from_config(config)?;
+        self.forwarder.cache.lock().await.clear();
+        self.snapshot.store(Arc::new(snapshot));
+        Ok(())
+    }
+
+    pub(crate) async fn daemon_status(&self) -> crate::control::DaemonStatus {
+        crate::control::DaemonStatus {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            revision: self.snapshot.load().revision,
+            uptime_seconds: self.started.elapsed().as_secs(),
+            cache_entries: self.forwarder.cache.lock().await.len(),
+            metrics: self.metrics.snapshot(),
+        }
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -448,10 +481,9 @@ impl DnsServer {
             tasks.spawn(run_tcp(Arc::clone(&self_arc), tcp, shutdown.clone()));
         }
         tasks.spawn(run_reload(Arc::clone(&self_arc), shutdown.clone()));
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         tasks.spawn(crate::control::serve(
-            self_arc.config_store.clone(),
-            Arc::clone(&self_arc.snapshot),
+            Arc::clone(&self_arc),
             shutdown.clone(),
         ));
 
@@ -513,9 +545,11 @@ async fn run_udp(
 ) -> Result<()> {
     let socket = Arc::new(socket);
     let mut buffer = vec![0_u8; MAX_UDP_PACKET];
+    let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
+            _ = tasks.join_next(), if !tasks.is_empty() => {},
             received = socket.recv_from(&mut buffer) => {
                 let (size, peer) = received?;
                 let request = buffer[..size].to_vec();
@@ -527,7 +561,7 @@ async fn run_udp(
                     debug!(%peer, "dropping DNS query at concurrency limit");
                     continue;
                 };
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     let _permit = permit;
                     match server.process(&request, peer).await {
                         Ok(response) => {
@@ -546,6 +580,8 @@ async fn run_udp(
             }
         }
     }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -554,16 +590,18 @@ async fn run_tcp(
     listener: TcpListener,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
+            _ = tasks.join_next(), if !tasks.is_empty() => {},
             accepted = listener.accept() => {
                 let (stream, peer) = accepted?;
                 let Ok(permit) = Arc::clone(&server.concurrency).try_acquire_owned() else {
                     continue;
                 };
                 let server = Arc::clone(&server);
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = handle_tcp(server, stream, peer).await {
                         debug!(%error, %peer, "TCP DNS session failed");
@@ -572,6 +610,8 @@ async fn run_tcp(
             }
         }
     }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -591,8 +631,11 @@ async fn handle_tcp(server: Arc<DnsServer>, mut stream: TcpStream, peer: SocketA
         let response = server.process(&request, peer).await?;
         let response_length =
             u16::try_from(response.len()).map_err(|_| anyhow!("DNS response too large"))?;
-        stream.write_all(&response_length.to_be_bytes()).await?;
-        stream.write_all(&response).await?;
+        time::timeout(Duration::from_secs(5), async {
+            stream.write_all(&response_length.to_be_bytes()).await?;
+            stream.write_all(&response).await
+        })
+        .await??;
     }
 }
 
@@ -612,6 +655,7 @@ async fn run_reload(server: Arc<DnsServer>, mut shutdown: watch::Receiver<bool>)
                         }
                         DnsSnapshot::from_config(&config)
                     }) {
+                        Ok(snapshot) if snapshot.revision == server.snapshot.load().revision => {}
                         Ok(snapshot) => {
                             server.forwarder.cache.lock().await.clear();
                             server.snapshot.store(Arc::new(snapshot));
@@ -635,6 +679,7 @@ fn local_response(request: &Message, snapshot: &DnsSnapshot) -> Result<Vec<u8>> 
     let name = query.name().to_ascii().to_ascii_lowercase();
     let mut response = Message::response(request.id, request.op_code);
     response.metadata.recursion_desired = request.recursion_desired;
+    response.metadata.checking_disabled = request.checking_disabled;
     response.metadata.recursion_available = true;
     response.metadata.authoritative = true;
     response.add_query(query.clone());
@@ -713,7 +758,16 @@ pub struct QueryResult {
     pub authoritative: bool,
     pub truncated: bool,
     pub answers: Vec<String>,
+    pub records: Vec<Answer>,
     pub elapsed_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Answer {
+    pub name: String,
+    pub record_type: String,
+    pub ttl: u32,
+    pub value: String,
 }
 
 pub async fn query_server(
@@ -752,6 +806,16 @@ pub async fn query_server(
         authoritative: response.authoritative,
         truncated: response.truncation,
         answers: response.answers.iter().map(ToString::to_string).collect(),
+        records: response
+            .answers
+            .iter()
+            .map(|record| Answer {
+                name: record.name.to_ascii(),
+                record_type: format!("{:?}", record.record_type()),
+                ttl: record.ttl,
+                value: record.data.to_string(),
+            })
+            .collect(),
         elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
     })
 }
@@ -850,6 +914,32 @@ mod tests {
         let response = Message::from_vec(&local_response(&request, &snapshot).unwrap()).unwrap();
         assert_eq!(response.response_code, ResponseCode::NXDomain);
         assert_eq!(response.authorities.len(), 1);
+    }
+
+    #[test]
+    fn startup_uses_latest_revision_and_excludes_offline_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.toml"));
+        store.initialize(&Config::default()).unwrap();
+        let stale = store.load().unwrap();
+        let request = crate::control::Request::Add {
+            record: RecordConfig {
+                name: "nas.home.arpa.".into(),
+                value: "192.168.1.20".into(),
+                ttl: 60,
+            },
+            expected_revision: 0,
+        };
+        crate::control::apply_offline(&store, request).unwrap();
+        let server = DnsServer::new(store.clone(), stale).unwrap();
+        assert_eq!(server.config.revision, 1);
+        let remove = crate::control::Request::Remove {
+            name: "nas.home.arpa.".into(),
+            value: None,
+            expected_revision: 1,
+        };
+        assert!(crate::control::apply_offline(&store, remove).is_err());
+        assert_eq!(store.load().unwrap().records.len(), 1);
     }
 
     #[test]

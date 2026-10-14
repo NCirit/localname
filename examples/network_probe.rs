@@ -6,6 +6,30 @@ use localname::query_server;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let server: SocketAddr = std::env::var("LOCALNAME_TEST_SERVER")?.parse()?;
+    if let Ok(address) = std::env::var("LOCALNAME_TEST_BOOTSTRAP") {
+        let address: SocketAddr = address.parse()?;
+        let mut ready = false;
+        for _ in 0..30 {
+            if let Ok(answer) = query_server(
+                address,
+                "home.arpa.",
+                RecordType::SOA,
+                Duration::from_secs(1),
+            )
+            .await
+                && answer.authoritative
+                && !answer.records.is_empty()
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        anyhow::ensure!(
+            ready,
+            "container bootstrap did not produce a healthy DNS service"
+        );
+    }
     for _ in 0..30 {
         if let Ok(answer) = query_server(
             server,

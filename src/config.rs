@@ -12,6 +12,8 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+use crate::error::{ErrorCode, coded};
+
 pub const CURRENT_SCHEMA: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,8 +75,17 @@ impl Default for Config {
 }
 
 impl Config {
-    #[allow(clippy::too_many_lines)]
     pub fn validate(&mut self) -> Result<()> {
+        self.validate_inner().map_err(|error| {
+            coded(
+                ErrorCode::InvalidInput,
+                format!("invalid configuration: {error:#}"),
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn validate_inner(&mut self) -> Result<()> {
         if self.schema != CURRENT_SCHEMA {
             bail!(
                 "unsupported configuration schema {}; expected {CURRENT_SCHEMA}",
@@ -82,7 +93,7 @@ impl Config {
             );
         }
         self.zone = canonical_zone(&self.zone)?;
-        if self.zone == "local." {
+        if name_in_zone(&self.zone, "local.") {
             bail!(".local is reserved for multicast DNS; use home.arpa or a domain you control");
         }
         if self.listen.is_empty() {
@@ -90,6 +101,9 @@ impl Config {
         }
         if self.upstreams.is_empty() {
             bail!("at least one upstream resolver is required");
+        }
+        if !self.services.is_empty() {
+            bail!("service proxying is not supported in this release");
         }
         for listen in &self.listen {
             if listen.port() == 0 || !is_private_address(listen.ip()) {
@@ -117,6 +131,7 @@ impl Config {
         }
 
         let mut by_name: HashMap<String, HashSet<&'static str>> = HashMap::new();
+        let mut cname_counts = HashMap::new();
         let zone = self.zone.clone();
         for record in &mut self.records {
             record.name = canonical_name(&record.name, &zone)?;
@@ -129,10 +144,16 @@ impl Config {
                     record.name
                 );
             }
-            let kind = if record.value.parse::<IpAddr>().is_ok() {
+            let kind = if let Ok(address) = record.value.parse::<IpAddr>() {
+                record.value = address.to_string();
                 "address"
             } else {
                 record.value = canonical_name(&record.value, &zone)?;
+                let count = cname_counts.entry(record.name.clone()).or_insert(0);
+                *count += 1;
+                if *count > 1 {
+                    bail!("{} may have only one CNAME record", record.name);
+                }
                 "cname"
             };
             let kinds = by_name.entry(record.name.clone()).or_default();
@@ -148,24 +169,15 @@ impl Config {
             .filter(|record| record.value.parse::<IpAddr>().is_err())
             .map(|record| (record.name.as_str(), record.value.as_str()))
             .collect();
-        for (name, kinds) in &by_name {
-            if kinds.contains("cname")
-                && self
-                    .records
-                    .iter()
-                    .filter(|record| &record.name == name)
-                    .count()
-                    > 1
-            {
-                bail!("{name} may have only one CNAME record");
-            }
-        }
         for start in cname_targets.keys() {
             let mut seen = HashSet::new();
             let mut current = *start;
             while let Some(next) = cname_targets.get(current) {
                 if !seen.insert(current) {
                     bail!("CNAME loop detected at {current}");
+                }
+                if seen.len() > 16 {
+                    bail!("CNAME chains may contain at most 16 aliases");
                 }
                 current = next;
             }
@@ -200,20 +212,23 @@ pub fn is_private_address(address: IpAddr) -> bool {
     }
 }
 
+/// Loopback, RFC 1918, link-local, and unique-local ranges: the only clients a home resolver serves.
+pub const PRIVATE_NETWORKS: [&str; 8] = [
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+];
+
 fn is_private_network(network: &IpNet) -> bool {
-    [
-        "127.0.0.0/8",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "169.254.0.0/16",
-        "::1/128",
-        "fc00::/7",
-        "fe80::/10",
-    ]
-    .iter()
-    .filter_map(|value| value.parse::<IpNet>().ok())
-    .any(|private| private.contains(network))
+    PRIVATE_NETWORKS
+        .iter()
+        .filter_map(|value| value.parse::<IpNet>().ok())
+        .any(|private| private.contains(network))
 }
 
 pub fn canonical_zone(zone: &str) -> Result<String> {
@@ -225,7 +240,7 @@ pub fn canonical_zone(zone: &str) -> Result<String> {
 pub fn canonical_name(name: &str, zone: &str) -> Result<String> {
     let value = name.trim().trim_end_matches('.').to_ascii_lowercase();
     if value.is_empty() {
-        bail!("name cannot be empty");
+        bail!("invalid DNS name: name cannot be empty");
     }
     let absolute = if value.contains('.') {
         value
@@ -262,6 +277,26 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
+    pub(crate) fn acquire_daemon_lock(&self) -> Result<std::fs::File> {
+        let path = self.path.with_extension("daemon.lock");
+        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        lock.try_lock_exclusive().map_err(|_| {
+            coded(
+                ErrorCode::Unavailable,
+                "DNS service unavailable: another daemon or offline writer owns this configuration",
+            )
+        })?;
+        Ok(lock)
+    }
+
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
@@ -324,10 +359,13 @@ impl ConfigStore {
             if let Some(expected) = expected_revision
                 && previous.revision != expected
             {
-                bail!(
-                    "stale revision: expected {expected}, current is {}",
-                    previous.revision
-                );
+                return Err(coded(
+                    ErrorCode::Conflict,
+                    format!(
+                        "stale revision: expected {expected}, current is {}",
+                        previous.revision
+                    ),
+                ));
             }
             let mut next = previous.clone();
             mutation(&mut next)?;
@@ -356,10 +394,7 @@ impl ConfigStore {
         revision: u64,
         expected_revision: Option<u64>,
     ) -> Result<Config> {
-        let backup = self.backup_path(revision);
-        let text = fs::read_to_string(&backup)
-            .with_context(|| format!("revision {revision} was not found"))?;
-        let restored: Config = toml::from_str(&text)?;
+        let restored = self.load_revision(revision)?;
         let (_, next) = self.mutate(expected_revision, |config| {
             let current_revision = config.revision;
             *config = restored;
@@ -388,6 +423,44 @@ impl ConfigStore {
             sync_parent(parent)?;
         }
         Ok(())
+    }
+
+    /// Load the stored contents of a previous revision without validating it against today's rules.
+    pub fn load_revision(&self, revision: u64) -> Result<Config> {
+        let path = self.backup_path(revision);
+        let text = fs::read_to_string(&path).map_err(|_| {
+            coded(
+                ErrorCode::InvalidInput,
+                format!("invalid revision: revision {revision} was not found"),
+            )
+        })?;
+        toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    /// Revisions that can be restored, oldest first.
+    pub fn revisions(&self) -> Result<Vec<u64>> {
+        let directory = self.backup_path(0);
+        let Some(directory) = directory.parent() else {
+            return Ok(Vec::new());
+        };
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut revisions = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name();
+            if let Some(revision) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".toml"))
+                .and_then(|stem| stem.parse().ok())
+            {
+                revisions.push(revision);
+            }
+        }
+        revisions.sort_unstable();
+        Ok(revisions)
     }
 
     fn backup_path(&self, revision: u64) -> PathBuf {
@@ -428,13 +501,16 @@ impl ConfigStore {
     }
 }
 
+#[cfg(unix)]
 fn sync_parent(parent: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    let _ = parent;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Windows cannot open directories for syncing; `MoveFileEx` replacement is already durable.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn sync_parent(_parent: &Path) -> Result<()> {
     Ok(())
 }
 

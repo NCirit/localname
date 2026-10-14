@@ -1,0 +1,33 @@
+services:
+  localname:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/usr/local/bin/container-entrypoint"]
+    environment:
+      LOCALNAME_LISTEN: 172.30.55.2:5354
+      LOCALNAME_ADVERTISE_ADDRESS: ${LOCALNAME_LAN_IP:?Set LOCALNAME_LAN_IP to this host's private LAN address}
+    ports:
+      - "${LOCALNAME_LAN_IP}:53:5354/udp"
+      - "${LOCALNAME_LAN_IP}:53:5354/tcp"
+    volumes:
+      - data:/var/lib/localname
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      dns:
+        ipv4_address: 172.30.55.2
+    healthcheck:
+      test: ["CMD", "localname", "--config", "/var/lib/localname/config.toml", "status", "--check", "--output", "json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  dns:
+    ipam:
+      config:
+        - subnet: 172.30.55.0/24
+volumes:
+  data:

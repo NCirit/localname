@@ -19,7 +19,7 @@
       "type": ["object", "null"],
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": ["INVALID_INPUT", "PERMISSION_REQUIRED", "CONFLICT", "UNAVAILABLE", "INTERNAL_ERROR"]},
+        "code": {"enum": ["INVALID_INPUT", "PERMISSION_REQUIRED", "CONFLICT", "UNAVAILABLE", "VERIFICATION_FAILED", "INTERNAL_ERROR"]},
         "message": {"type": "string"}
       }
     }

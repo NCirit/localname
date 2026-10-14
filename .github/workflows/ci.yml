@@ -38,4 +38,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker compose -p localname-test -f tests/network/compose.yml up --build --abort-on-container-exit --exit-code-from client
       - if: always()
-        run: docker compose -p localname-test -f tests/network/compose.yml down
+        run: docker compose -p localname-test -f tests/network/compose.yml down --volumes

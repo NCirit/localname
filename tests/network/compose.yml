@@ -45,8 +45,25 @@ services:
     entrypoint: ["network-probe"]
     environment:
       LOCALNAME_TEST_SERVER: 10.53.0.1:5354
-    depends_on: [router, server, upstream]
+      LOCALNAME_TEST_BOOTSTRAP: 10.53.0.10:5354
+    depends_on: [router, server, upstream, bootstrap]
     networks: [lan]
+  bootstrap:
+    build:
+      context: ../..
+      target: network-test
+    entrypoint: ["/bin/sh", "/usr/local/bin/container-entrypoint"]
+    environment:
+      LOCALNAME_LISTEN: 10.53.0.10:5354
+      LOCALNAME_ADVERTISE_ADDRESS: 192.168.1.10
+    volumes:
+      - bootstrap_state:/var/lib/localname
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      lan:
+        ipv4_address: 10.53.0.10
 networks:
   lan:
     internal: true
@@ -54,3 +71,5 @@ networks:
       config:
         - subnet: 10.53.0.0/24
           gateway: 10.53.0.254
+volumes:
+  bootstrap_state:

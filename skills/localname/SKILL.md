@@ -12,14 +12,16 @@ Use the same `--config PATH` on every command when the user selects a configurat
 ## Add or remove a name
 
 1. Inspect `localname status --output json` and `localname list --output json`.
-2. Preview the requested change with `localname add NAME ADDRESS --dry-run --output json` or `localname remove NAME --dry-run --output json`.
+2. Preview the requested change with `localname add NAME ADDRESS --dry-run --output json` or `localname remove NAME --dry-run --output json`. Use `remove NAME --value VALUE` to remove one address of a multi-address name.
 3. Apply using `--expect-revision REVISION` from the inspected state. If it reports a stale revision, inspect the new state and determine whether the requested change still applies.
-4. When the daemon is running, check `localname resolve NAME --output json`. Inspect the response code and actual answer values; a successful command alone does not prove a positive DNS answer.
+4. When the daemon is running, the command reads the change back itself: `verification.status` is `passed` only when the listener's SOA serial equals the new revision and the record resolves (or no longer resolves). `not_running` means only the configuration changed. Exit code 7 / `VERIFICATION_FAILED` means the change was committed but not observed; report it and offer the returned `rollback` command.
 5. Report the fully qualified name, resulting revision, verification scope, and the returned rollback command, preserving the selected configuration path.
 
-Short names expand beneath `home.arpa`. `add NAME TARGET` also supports aliases to another configured local name. Use an IP address rather than a port-bearing URL for device records.
+Short names expand beneath the configured zone (`home.arpa` by default); read the zone from status rather than assuming it for existing installations. `add NAME TARGET` also supports aliases to another configured local name. Use an IP address rather than a port-bearing URL for device records.
 
-`localname rollback N` restores the contents of revision N as a new revision. Preview the current records before rollback because it restores the whole configuration rather than just one record.
+`localname rollback N` restores the contents of revision N as a new revision. It restores the whole configuration rather than one record, so list candidates with `localname revisions --output json`, preview with `localname rollback N --dry-run --output json` (it reports `records_added` and `records_removed`), then apply with `--expect-revision CURRENT`.
+
+`localname status --output json` reports `data.daemon` (served revision and aggregate counters) when the server runs. A warning that the daemon serves a different revision than the file means a reload was rejected; run `localname diagnose`.
 
 ## Setup and diagnosis
 
