@@ -37,6 +37,8 @@ localname rollback 0
 
 Configuration backups are stored beside the configuration file. `rollback N` restores the contents of revision N as a new revision. Listener changes require restarting the server.
 
+Agents can use the bundled `skills/localname` skill. `localname skill --output json` returns the version-matched instructions, a generated reference for every command, and the output schema. `localname schema` prints the schema separately.
+
 Development checks:
 
 ```console

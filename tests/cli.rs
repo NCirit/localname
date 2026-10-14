@@ -56,6 +56,28 @@ fn errors_are_machine_readable() {
 }
 
 #[test]
+fn agent_bundle_is_available_without_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.toml");
+    let result = run(&path, &["skill"]);
+    assert!(result.status.success());
+    let data = json(&result);
+    assert_eq!(data["data"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        data["data"]["output_schema"]["properties"]["schema_version"]["const"],
+        "1"
+    );
+    assert!(
+        data["data"]["cli_reference"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["command"] == "localname add")
+    );
+    assert!(!path.exists());
+}
+
+#[test]
 fn cname_repeated_add_does_not_duplicate_canonical_target() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
