@@ -2,6 +2,7 @@
 
 mod client;
 mod forward;
+mod pool;
 mod server;
 pub mod special;
 

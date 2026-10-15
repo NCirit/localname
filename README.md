@@ -27,6 +27,22 @@ localname diagnose --output json
 
 For home-network setup, run `localname setup` to inspect the network and show the proposed server address. `localname setup --apply` writes the configuration. Start the server, reserve its address in your router, then set the router's LAN/DHCP DNS server to that address. Port 53 must be available and the host firewall must permit DNS over UDP and TCP from your LAN. The setup command currently provides guidance; it does not install a service or change your router.
 
+On Linux with systemd, install the hardened service unit from `packaging/systemd`. It runs as a dedicated `localname` account that keeps only the capability to bind port 53, and stores configuration and revisions in `/var/lib/localname`:
+
+```console
+sudo install -m 0755 target/release/localname /usr/bin/localname
+sudo install -m 0644 packaging/systemd/localname.service /usr/lib/systemd/system/
+sudo install -m 0644 packaging/systemd/localname.sysusers /usr/lib/sysusers.d/localname.conf
+sudo install -m 0644 packaging/systemd/localname.tmpfiles /usr/lib/tmpfiles.d/localname.conf
+sudo systemd-sysusers && sudo systemd-tmpfiles --create
+export LOCALNAME_CONFIG=/var/lib/localname/config.toml
+sudo -E -u localname localname setup --apply
+sudo systemctl enable --now localname
+sudo -E localname add nas 192.168.1.20
+```
+
+Administrators (root) can change records while the service runs; changes made while it is stopped keep the files owned by the service account.
+
 Alternatively, run a persistent container service. Replace the address below with this host's private LAN address:
 
 ```console

@@ -63,3 +63,10 @@ jobs:
         with:
           name: benchmark-${{ runner.arch }}
           path: benchmark-*.json
+  systemd:
+    # Boots the packaged unit under systemd, mutates it live and offline, and restarts the
+    # container to check that the enabled service returns with the committed revision.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/systemd/run.sh

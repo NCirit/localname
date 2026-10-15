@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
@@ -15,11 +15,11 @@ use hickory_proto::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    net::TcpStream,
     time,
 };
 
-use super::{MAX_TCP_PACKET, MAX_UDP_PACKET, Metrics};
+use super::{MAX_TCP_PACKET, Metrics, pool::UpstreamPool};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct CacheKey {
@@ -128,6 +128,7 @@ impl Drop for InFlightGuard<'_> {
 pub(crate) struct Forwarder {
     pub cache: Mutex<Cache>,
     in_flight: InFlight,
+    pool: UpstreamPool,
     metrics: Arc<Metrics>,
 }
 
@@ -142,12 +143,31 @@ impl Forwarder {
         Self {
             cache: Mutex::new(Cache::default()),
             in_flight: InFlight::default(),
+            pool: UpstreamPool::default(),
             metrics,
         }
     }
 
-    pub fn clear(&self) {
+    /// Drop cached answers and sockets for upstreams that left the configuration.
+    pub fn reset(&self, upstreams: &[SocketAddr]) {
         self.cache_lock().clear();
+        self.pool.retain(upstreams);
+    }
+
+    async fn query_udp(
+        &self,
+        request: &[u8],
+        message: &Message,
+        upstream: SocketAddr,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let bytes = self.pool.query(request, upstream, timeout).await?;
+        let response = Message::from_vec(&bytes).context("invalid upstream response")?;
+        validate_response(message, &response)?;
+        if response.truncation {
+            return query_upstream_tcp(request, upstream, timeout).await;
+        }
+        Ok(bytes)
     }
 
     pub fn cache_len(&self) -> usize {
@@ -224,7 +244,10 @@ impl Forwarder {
         let _in_flight = self.in_flight.enter((key.name.clone(), key.record_type));
         let mut last_error = None;
         for upstream in upstreams.servers {
-            match query_upstream(request, *upstream, upstreams.timeout).await {
+            match self
+                .query_udp(request, message, *upstream, upstreams.timeout)
+                .await
+            {
                 Ok(bytes) => {
                     let ttl = response_ttl(&bytes).unwrap_or(0).min(86_400);
                     if cacheable && ttl > 0 {
@@ -276,41 +299,6 @@ pub(crate) fn response_ttl(bytes: &[u8]) -> Option<u32> {
         Some(ttl.min(negative_ttl))
     } else {
         Some(ttl)
-    }
-}
-
-pub(crate) async fn query_upstream(
-    request: &[u8],
-    upstream: SocketAddr,
-    timeout: Duration,
-) -> Result<Vec<u8>> {
-    let bind = match upstream {
-        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-        SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
-    };
-    let socket = UdpSocket::bind(bind).await?;
-    socket.connect(upstream).await?;
-    socket.send(request).await?;
-    let request_message = Message::from_vec(request)?;
-    let mut buffer = vec![0_u8; MAX_UDP_PACKET];
-    let deadline = time::Instant::now() + timeout;
-    // A connected socket only accepts datagrams from the upstream; still ignore
-    // mismatched responses rather than failing, so a stray packet cannot cancel the query.
-    loop {
-        let size = time::timeout_at(deadline, socket.recv(&mut buffer))
-            .await
-            .context("upstream UDP timeout")??;
-        let Ok(response) = Message::from_vec(&buffer[..size]) else {
-            continue;
-        };
-        if validate_response(&request_message, &response).is_err() {
-            continue;
-        }
-        if response.truncation {
-            return query_upstream_tcp(request, upstream, timeout).await;
-        }
-        buffer.truncate(size);
-        return Ok(buffer);
     }
 }
 

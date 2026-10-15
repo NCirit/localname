@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     Config, ConfigStore, RecordConfig,
-    control::{self, Request},
+    control::{self, Applied, Request},
     error::{ErrorCode, coded},
     output::{Envelope, OutputFormat},
     query_server,
@@ -136,9 +136,9 @@ fn not_running() -> Value {
 }
 
 /// Apply through the daemon when it runs, otherwise under the offline writer lock.
-fn commit(store: &ConfigStore, request: Request) -> Result<(Config, bool)> {
+fn commit(store: &ConfigStore, request: Request) -> Result<(Applied, bool)> {
     match control::request_if_running(store, &request)? {
-        Some(config) => Ok((config, true)),
+        Some(applied) => Ok((applied, true)),
         None => Ok((control::apply_offline(store, request)?, false)),
     }
 }
@@ -186,20 +186,22 @@ pub async fn add(output: OutputFormat, store: &ConfigStore, args: &ChangeArgs) -
             },
         );
     }
-    let (next, running) = commit(
+    let (applied, running) = commit(
         store,
         Request::Add {
             record,
-            expected_revision: current.revision,
+            expected_revision: args.expect_revision,
         },
     )?;
-    let changed = next.revision != current.revision;
+    let changed = applied.changed();
+    let previous = applied.previous_revision;
+    let next = applied.config;
     let mut envelope = Envelope::success("add", changed, Some(next.revision), data.clone());
     envelope.verification = Some(if running {
         verify(
             "add",
             &next,
-            current.revision,
+            previous,
             &data,
             Expectation::Present {
                 name: &name,
@@ -211,7 +213,7 @@ pub async fn add(output: OutputFormat, store: &ConfigStore, args: &ChangeArgs) -
         not_running()
     });
     if changed {
-        envelope.rollback = Some(rollback_command(store.path(), current.revision));
+        envelope.rollback = Some(rollback_command(store.path(), previous));
     }
     print_result(output, envelope, || {
         if changed {
@@ -247,21 +249,23 @@ pub async fn remove(output: OutputFormat, store: &ConfigStore, args: &RemoveArgs
             || format!("Would remove {matching} record(s) for {name}"),
         );
     }
-    let (next, running) = commit(
+    let (applied, running) = commit(
         store,
         Request::Remove {
             name: name.clone(),
             value: value.clone(),
-            expected_revision: current.revision,
+            expected_revision: args.expect_revision,
         },
     )?;
-    let changed = next.revision != current.revision;
+    let changed = applied.changed();
+    let previous = applied.previous_revision;
+    let next = applied.config;
     let mut envelope = Envelope::success("remove", changed, Some(next.revision), data.clone());
     envelope.verification = Some(if running {
         verify(
             "remove",
             &next,
-            current.revision,
+            previous,
             &data,
             Expectation::Absent {
                 name: &name,
@@ -273,7 +277,7 @@ pub async fn remove(output: OutputFormat, store: &ConfigStore, args: &RemoveArgs
         not_running()
     });
     if changed {
-        envelope.rollback = Some(rollback_command(store.path(), current.revision));
+        envelope.rollback = Some(rollback_command(store.path(), previous));
     }
     print_result(output, envelope, || {
         format!("Removed {matching} record(s) for {name}")
@@ -375,29 +379,24 @@ pub async fn rollback(
             || summary,
         );
     }
-    let (next, running) = commit(
+    let (applied, running) = commit(
         store,
         Request::Rollback {
             revision: args.revision,
-            expected_revision: current.revision,
+            expected_revision: args.expect_revision,
         },
     )?;
-    let changed = next.revision != current.revision;
+    let changed = applied.changed();
+    let previous = applied.previous_revision;
+    let next = applied.config;
     let mut envelope = Envelope::success("rollback", changed, Some(next.revision), data.clone());
     envelope.verification = Some(if running {
-        verify(
-            "rollback",
-            &next,
-            current.revision,
-            &data,
-            Expectation::Serial,
-        )
-        .await?
+        verify("rollback", &next, previous, &data, Expectation::Serial).await?
     } else {
         not_running()
     });
     if changed {
-        envelope.rollback = Some(rollback_command(store.path(), current.revision));
+        envelope.rollback = Some(rollback_command(store.path(), previous));
     }
     let revision = next.revision;
     print_result(output, envelope, || {

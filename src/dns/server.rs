@@ -130,7 +130,7 @@ impl DnsServer {
             bail!("listener changes require a service restart");
         }
         let snapshot = DnsSnapshot::from_config(config)?;
-        self.forwarder.clear();
+        self.forwarder.reset(&config.upstreams);
         self.snapshot.store(Arc::new(snapshot));
         Ok(())
     }
@@ -361,48 +361,45 @@ async fn run_udp(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut buffer = vec![0_u8; MAX_UDP_PACKET];
-    let mut tasks = JoinSet::new();
+    // Forwards run as detached tasks bounded by the semaphore and the upstream timeout.
+    // Keeping a JoinSet in this select! starved the loop after tokio's cooperative budget
+    // was spent (128 receives), stalling local answers behind slow upstreams.
     loop {
-        tokio::select! {
+        let (size, peer) = tokio::select! {
             _ = shutdown.changed() => break,
-            _ = tasks.join_next(), if !tasks.is_empty() => {},
-            received = socket.recv_from(&mut buffer) => {
-                let (size, peer) = match received {
-                    Ok(received) => received,
-                    // ICMP port-unreachable from an earlier reply surfaces here on some platforms.
-                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                let request = &buffer[..size];
-                match server.decide(request, peer) {
-                    (Outcome::Answer(response), limit) => {
-                        if let Err(error) = socket.send_to(&fit_udp(response, limit), peer).await {
-                            debug!(%error, %peer, "failed to send UDP response");
-                        }
-                    }
-                    (Outcome::Forward(message, upstreams), limit) => {
-                        let Ok(permit) = Arc::clone(&server.forwards).try_acquire_owned() else {
-                            Metrics::add(&server.metrics.dropped);
-                            continue;
-                        };
-                        let request = request.to_vec();
-                        let server = Arc::clone(&server);
-                        let socket = Arc::clone(&socket);
-                        tasks.spawn(async move {
-                            let _permit = permit;
-                            let response = server.forward(&request, &message, &upstreams).await;
-                            if let Err(error) = socket.send_to(&fit_udp(response, limit), peer).await {
-                                debug!(%error, %peer, "failed to send UDP response");
-                            }
-                        });
-                    }
-                    (Outcome::Drop, _) => {}
+            received = socket.recv_from(&mut buffer) => match received {
+                Ok(received) => received,
+                // ICMP port-unreachable from an earlier reply surfaces here on some platforms.
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => continue,
+                Err(error) => return Err(error.into()),
+            },
+        };
+        let request = &buffer[..size];
+        match server.decide(request, peer) {
+            (Outcome::Answer(response), limit) => {
+                if let Err(error) = socket.send_to(&fit_udp(response, limit), peer).await {
+                    debug!(%error, %peer, "failed to send UDP response");
                 }
             }
+            (Outcome::Forward(message, upstreams), limit) => {
+                let Ok(permit) = Arc::clone(&server.forwards).try_acquire_owned() else {
+                    Metrics::add(&server.metrics.dropped);
+                    continue;
+                };
+                let request = request.to_vec();
+                let server = Arc::clone(&server);
+                let socket = Arc::clone(&socket);
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let response = server.forward(&request, &message, &upstreams).await;
+                    if let Err(error) = socket.send_to(&fit_udp(response, limit), peer).await {
+                        debug!(%error, %peer, "failed to send UDP response");
+                    }
+                });
+            }
+            (Outcome::Drop, _) => {}
         }
     }
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -752,7 +749,7 @@ mod tests {
                 value: "192.168.1.20".into(),
                 ttl: 60,
             },
-            expected_revision: 0,
+            expected_revision: Some(0),
         };
         crate::control::apply_offline(&store, request).unwrap();
         let server = DnsServer::new(store.clone(), stale).unwrap();
@@ -760,7 +757,7 @@ mod tests {
         let remove = crate::control::Request::Remove {
             name: "nas.home.arpa.".into(),
             value: None,
-            expected_revision: 1,
+            expected_revision: Some(1),
         };
         assert!(crate::control::apply_offline(&store, remove).is_err());
         assert_eq!(store.load().unwrap().records.len(), 1);

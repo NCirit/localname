@@ -168,9 +168,10 @@ fn committed_change_with_failed_dns_readback_returns_rollback_data() {
         let mut bytes = vec![0; u32::from_be_bytes(size) as usize];
         stream.read_exact(&mut bytes).unwrap();
         let frame: control::Frame<Request> = serde_json::from_slice(&bytes).unwrap();
-        let config = control::apply(&store, frame.body).unwrap();
+        let applied = control::apply(&store, frame.body).unwrap();
         let frame = serde_json::to_vec(&Response {
-            config: Some(config),
+            previous_revision: Some(applied.previous_revision),
+            config: Some(applied.config),
             ..Response::default()
         })
         .unwrap();

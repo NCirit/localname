@@ -306,26 +306,6 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    pub(crate) fn acquire_daemon_lock(&self) -> Result<std::fs::File> {
-        let path = self.path.with_extension("daemon.lock");
-        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
-        }
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        lock.try_lock_exclusive().map_err(|_| {
-            coded(
-                ErrorCode::Unavailable,
-                "DNS service unavailable: another daemon or offline writer owns this configuration",
-            )
-        })?;
-        Ok(lock)
-    }
-
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
@@ -338,11 +318,60 @@ impl ConfigStore {
         self.path.exists()
     }
 
+    fn parent(&self) -> &Path {
+        self.path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+    }
+
+    /// Open (creating if needed) a lock file beside the configuration.
+    fn lock_file(&self, extension: &str) -> Result<fs::File> {
+        let path = self.path.with_extension(extension);
+        fs::create_dir_all(self.parent())?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        adopt_owner(&file, self.parent())?;
+        Ok(file)
+    }
+
+    /// Held exclusively for the daemon's lifetime. Offline writers hold it shared, so a
+    /// daemon never starts in the middle of an offline change (it waits briefly instead).
+    pub(crate) fn acquire_daemon_lock(&self) -> Result<fs::File> {
+        let lock = self.lock_file("daemon.lock")?;
+        for _ in 0..100 {
+            if lock.try_lock_exclusive().is_ok() {
+                return Ok(lock);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Err(coded(
+            ErrorCode::Unavailable,
+            "DNS service unavailable: another daemon owns this configuration",
+        ))
+    }
+
+    /// Shared hold for an offline change; fails while a daemon owns the configuration.
+    pub(crate) fn acquire_offline_lock(&self) -> Result<fs::File> {
+        let lock = self.lock_file("daemon.lock")?;
+        FileExt::try_lock_shared(&lock).map_err(|_| {
+            coded(
+                ErrorCode::Unavailable,
+                "DNS service unavailable: a daemon owns this configuration but its control endpoint did not answer",
+            )
+        })?;
+        Ok(lock)
+    }
+
     pub fn load(&self) -> Result<Config> {
         let text = fs::read_to_string(&self.path)
             .with_context(|| format!("failed to read {}", self.path.display()))?;
-        let mut config: Config = toml::from_str(&text)
-            .with_context(|| format!("failed to parse {}", self.path.display()))?;
+        let mut config =
+            parse(&text).with_context(|| format!("failed to parse {}", self.path.display()))?;
         config.validate()?;
         Ok(config)
     }
@@ -359,31 +388,26 @@ impl ConfigStore {
 
     pub fn initialize(&self, config: &Config) -> Result<()> {
         if self.exists() {
-            bail!("configuration already exists at {}", self.path.display());
+            return Err(coded(
+                ErrorCode::Conflict,
+                format!("configuration already exists at {}", self.path.display()),
+            ));
         }
         self.write_atomic(config, false)
     }
 
+    /// Apply `mutation` to the latest revision under an exclusive lock. With
+    /// `expected_revision`, refuse unless the configuration is still at that revision.
+    /// Returns the previous and resulting configurations; an unchanged result is not a
+    /// new revision.
     pub fn mutate<F>(&self, expected_revision: Option<u64>, mutation: F) -> Result<(Config, Config)>
     where
         F: FnOnce(&mut Config) -> Result<()>,
     {
-        let lock_path = self.path.with_extension("lock");
-        if let Some(parent) = lock_path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
+        let lock = self.lock_file("lock")?;
         lock.lock_exclusive()?;
-
         let result = (|| {
+            self.remove_stale_temporaries();
             let previous = self.load()?;
             if let Some(expected) = expected_revision
                 && previous.revision != expected
@@ -398,6 +422,7 @@ impl ConfigStore {
             }
             let mut next = previous.clone();
             mutation(&mut next)?;
+            next.revision = previous.revision;
             next.validate()?;
             if next == previous {
                 return Ok((previous.clone(), previous));
@@ -406,6 +431,8 @@ impl ConfigStore {
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("revision overflow"))?;
+            // The backup is durable before the live file changes, so a crash at any point
+            // leaves either the old revision or the new one, never a gap.
             self.backup(&previous)?;
             self.write_atomic(&next, true)?;
             Ok((previous, next))
@@ -415,43 +442,40 @@ impl ConfigStore {
     }
 
     pub fn rollback(&self, revision: u64) -> Result<Config> {
-        self.rollback_expected(revision, None)
+        Ok(self.rollback_expected(revision, None)?.1)
     }
 
+    /// Restore the contents of `revision` as a new revision.
     pub fn rollback_expected(
         &self,
         revision: u64,
         expected_revision: Option<u64>,
-    ) -> Result<Config> {
+    ) -> Result<(Config, Config)> {
         let restored = self.load_revision(revision)?;
-        let (_, next) = self.mutate(expected_revision, |config| {
-            let current_revision = config.revision;
+        self.mutate(expected_revision, |config| {
             *config = restored;
-            config.revision = current_revision;
             Ok(())
-        })?;
-        Ok(next)
+        })
     }
 
     fn backup(&self, config: &Config) -> Result<()> {
         let path = self.backup_path(config.revision);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| anyhow!("backup directory is missing"))?;
+        if !directory.exists() {
+            fs::create_dir_all(directory)?;
+            adopt_owner(&fs::File::open(directory)?, self.parent())?;
         }
-        if !path.exists() {
-            let text = toml::to_string_pretty(config)?;
-            let parent = path
-                .parent()
-                .ok_or_else(|| anyhow!("backup directory is missing"))?;
-            let mut temporary = NamedTempFile::new_in(parent)?;
-            temporary.write_all(text.as_bytes())?;
-            temporary.as_file().sync_all()?;
-            temporary
-                .persist_noclobber(&path)
-                .map_err(|error| error.error)?;
-            sync_parent(parent)?;
+        if path.exists() {
+            return Ok(());
         }
-        Ok(())
+        let text = toml::to_string_pretty(config)?;
+        let temporary = self.temporary_in(directory, text.as_bytes())?;
+        temporary
+            .persist_noclobber(&path)
+            .map_err(|error| error.error)?;
+        sync_parent(directory)
     }
 
     /// Load the stored contents of a previous revision without validating it against today's rules.
@@ -463,7 +487,7 @@ impl ConfigStore {
                 format!("invalid revision: revision {revision} was not found"),
             )
         })?;
-        toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+        parse(&text).with_context(|| format!("failed to parse {}", path.display()))
     }
 
     /// Revisions that can be restored, oldest first.
@@ -503,31 +527,132 @@ impl ConfigStore {
             .join(format!("{revision}.toml"))
     }
 
+    /// A synced temporary file with a recognizable name, owned like the configuration.
+    fn temporary_in(&self, directory: &Path, contents: &[u8]) -> Result<NamedTempFile> {
+        let mut temporary = tempfile::Builder::new()
+            .prefix(TEMPORARY_PREFIX)
+            .suffix(".tmp")
+            .tempfile_in(directory)?;
+        temporary.write_all(contents)?;
+        temporary.as_file().sync_all()?;
+        adopt_owner(temporary.as_file(), self.parent())?;
+        Ok(temporary)
+    }
+
+    /// Temporaries left by a writer that crashed before renaming. Only called under the
+    /// write lock, so no live writer owns them.
+    fn remove_stale_temporaries(&self) {
+        let directories = [
+            self.parent().to_path_buf(),
+            self.backup_path(0)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+        ];
+        for directory in directories {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ours = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(TEMPORARY_PREFIX))
+                    && path.extension().is_some_and(|extension| extension == "tmp");
+                if ours {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
     fn write_atomic(&self, config: &Config, overwrite: bool) -> Result<()> {
         let mut checked = config.clone();
         checked.validate()?;
         let text = toml::to_string_pretty(&checked)?;
-        let parent = self
-            .path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        let parent = self.parent();
         fs::create_dir_all(parent)?;
-        let mut temp = NamedTempFile::new_in(parent)?;
-        temp.write_all(text.as_bytes())?;
-        temp.as_file().sync_all()?;
-        if !overwrite && self.path.exists() {
-            bail!("configuration already exists at {}", self.path.display());
-        }
+        let temporary = self.temporary_in(parent, text.as_bytes())?;
         if overwrite {
-            temp.persist(&self.path).map_err(|error| error.error)?;
+            temporary.persist(&self.path).map_err(|error| error.error)?;
         } else {
-            temp.persist_noclobber(&self.path)
+            temporary
+                .persist_noclobber(&self.path)
                 .map_err(|error| error.error)?;
         }
-        sync_parent(parent)?;
-        Ok(())
+        sync_parent(parent)
     }
+}
+
+const TEMPORARY_PREFIX: &str = ".localname-";
+
+/// Parse a configuration, refusing schemas from newer releases instead of guessing.
+fn parse(text: &str) -> Result<Config> {
+    let mut table: toml::Table = toml::from_str(text)?;
+    let schema = match table.get("schema") {
+        None => CURRENT_SCHEMA,
+        Some(toml::Value::Integer(schema)) => u32::try_from(*schema).map_err(|_| {
+            coded(
+                ErrorCode::InvalidInput,
+                format!("invalid configuration schema {schema}"),
+            )
+        })?,
+        Some(_) => {
+            return Err(coded(
+                ErrorCode::InvalidInput,
+                "invalid configuration schema: expected an integer",
+            ));
+        }
+    };
+    if schema == 0 {
+        return Err(coded(
+            ErrorCode::InvalidInput,
+            "invalid configuration schema 0",
+        ));
+    }
+    if schema > CURRENT_SCHEMA {
+        return Err(coded(
+            ErrorCode::InvalidInput,
+            format!(
+                "unsupported configuration schema {schema}: written by a newer localname (this release reads schema {CURRENT_SCHEMA}); upgrade localname or restore an older revision"
+            ),
+        ));
+    }
+    for step in &MIGRATIONS[usize::try_from(schema - 1)
+        .unwrap_or(usize::MAX)
+        .min(MIGRATIONS.len())..]
+    {
+        step(&mut table);
+    }
+    table.insert("schema".into(), toml::Value::Integer(CURRENT_SCHEMA.into()));
+    Ok(table.try_into()?)
+}
+
+/// `MIGRATIONS[n - 1]` upgrades schema `n` to `n + 1`. Steps are pure table rewrites so a
+/// migrated file is only persisted by the next ordinary, backed-up write.
+type Migration = fn(&mut toml::Table);
+const MIGRATIONS: [Migration; CURRENT_SCHEMA as usize - 1] = [];
+
+/// When running as root on Unix, give a newly created file to the owner of `directory`, so
+/// an administrator's offline edit never leaves files the service account cannot replace.
+#[cfg(unix)]
+fn adopt_owner(file: &fs::File, directory: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if !crate::privilege::is_root() {
+        return Ok(());
+    }
+    let owner = fs::metadata(directory)?;
+    if owner.uid() != 0 {
+        std::os::unix::fs::fchown(file, Some(owner.uid()), Some(owner.gid()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn adopt_owner(_file: &fs::File, _directory: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

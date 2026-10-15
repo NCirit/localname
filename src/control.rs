@@ -19,19 +19,23 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Request {
+    /// Without `expected_revision`, changes apply to the latest revision.
     Add {
         record: RecordConfig,
-        expected_revision: u64,
+        #[serde(default)]
+        expected_revision: Option<u64>,
     },
     Remove {
         name: String,
         #[serde(default)]
         value: Option<String>,
-        expected_revision: u64,
+        #[serde(default)]
+        expected_revision: Option<u64>,
     },
     Rollback {
         revision: u64,
-        expected_revision: u64,
+        #[serde(default)]
+        expected_revision: Option<u64>,
     },
     Status,
 }
@@ -46,6 +50,8 @@ pub struct Frame<T> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Response {
     pub config: Option<Config>,
+    #[serde(default)]
+    pub previous_revision: Option<u64>,
     pub status: Option<DaemonStatus>,
     pub error: Option<String>,
     #[serde(default)]
@@ -84,7 +90,7 @@ fn daemon_absent(store: &ConfigStore, error: &std::io::Error) -> Result<()> {
         .read(true)
         .write(true)
         .open(store.path().with_extension("daemon.lock"))?;
-    if fs2::FileExt::try_lock_exclusive(&lock).is_ok() {
+    if fs2::FileExt::try_lock_shared(&lock).is_ok() {
         return Ok(());
     }
     Err(coded(
@@ -178,63 +184,80 @@ fn send_frame<S: std::io::Read + std::io::Write>(
     Ok(response)
 }
 
+/// The outcome of a committed change: the revision it was applied to and the result.
+#[derive(Debug)]
+pub struct Applied {
+    pub previous_revision: u64,
+    pub config: Config,
+}
+
+impl Applied {
+    pub fn changed(&self) -> bool {
+        self.config.revision != self.previous_revision
+    }
+}
+
 /// Apply a configuration change through the running daemon when present.
-pub fn request_if_running(store: &ConfigStore, request: &Request) -> Result<Option<Config>> {
+pub fn request_if_running(store: &ConfigStore, request: &Request) -> Result<Option<Applied>> {
     send_if_running(store, request)?
         .map(|response| {
-            response
+            let config = response
                 .config
-                .ok_or_else(|| anyhow::anyhow!("control response has no configuration"))
+                .ok_or_else(|| anyhow::anyhow!("control response has no configuration"))?;
+            Ok(Applied {
+                previous_revision: response.previous_revision.unwrap_or(config.revision),
+                config,
+            })
         })
         .transpose()
 }
 
-pub fn apply(store: &ConfigStore, request: Request) -> Result<Config> {
-    match request {
+pub fn apply(store: &ConfigStore, request: Request) -> Result<Applied> {
+    let (previous, config) = match request {
         Request::Add {
             record,
             expected_revision,
-        } => {
-            let (_, config) =
-                store.mutate(Some(expected_revision), |config| {
-                    if let Some(existing) = config.records.iter_mut().find(|existing| {
-                        existing.name == record.name && existing.value == record.value
-                    }) {
-                        existing.ttl = record.ttl;
-                    } else {
-                        config.records.push(record);
-                    }
-                    Ok(())
-                })?;
-            Ok(config)
-        }
+        } => store.mutate(expected_revision, |config| {
+            if let Some(existing) = config
+                .records
+                .iter_mut()
+                .find(|existing| existing.name == record.name && existing.value == record.value)
+            {
+                existing.ttl = record.ttl;
+            } else {
+                config.records.push(record);
+            }
+            Ok(())
+        })?,
         Request::Remove {
             name,
             value,
             expected_revision,
-        } => {
-            let (_, config) = store.mutate(Some(expected_revision), |config| {
-                config.records.retain(|record| {
-                    record.name != name
-                        || value.as_ref().is_some_and(|value| &record.value != value)
-                });
-                Ok(())
-            })?;
-            Ok(config)
-        }
+        } => store.mutate(expected_revision, |config| {
+            config.records.retain(|record| {
+                record.name != name || value.as_ref().is_some_and(|value| &record.value != value)
+            });
+            Ok(())
+        })?,
         Request::Rollback {
             revision,
             expected_revision,
-        } => store.rollback_expected(revision, Some(expected_revision)),
-        Request::Status => Err(coded(
-            ErrorCode::Unavailable,
-            "DNS service unavailable: status requires a running daemon",
-        )),
-    }
+        } => store.rollback_expected(revision, expected_revision)?,
+        Request::Status => {
+            return Err(coded(
+                ErrorCode::Unavailable,
+                "DNS service unavailable: status requires a running daemon",
+            ));
+        }
+    };
+    Ok(Applied {
+        previous_revision: previous.revision,
+        config,
+    })
 }
 
-pub fn apply_offline(store: &ConfigStore, request: Request) -> Result<Config> {
-    let _guard = store.acquire_daemon_lock()?;
+pub fn apply_offline(store: &ConfigStore, request: Request) -> Result<Applied> {
+    let _guard = store.acquire_offline_lock()?;
     apply(store, request)
 }
 
@@ -286,9 +309,10 @@ where
         Ok(frame) => {
             let request_store = server.store().clone();
             match tokio::task::spawn_blocking(move || apply(&request_store, frame.body)).await? {
-                Ok(config) => match server.install(&config) {
+                Ok(applied) => match server.install(&applied.config) {
                     Ok(()) => Response {
-                        config: Some(config),
+                        config: Some(applied.config),
+                        previous_revision: Some(applied.previous_revision),
                         ..Response::default()
                     },
                     Err(error) => error_response(&error),
