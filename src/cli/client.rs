@@ -31,7 +31,7 @@ pub enum ClientCommand {
 
 #[derive(Debug, Args)]
 pub struct ZoneArgs {
-    #[arg(long, default_value = "home.arpa")]
+    #[arg(long, default_value = crate::config::DEFAULT_ZONE)]
     zone: String,
 }
 
@@ -43,7 +43,7 @@ pub struct SetupArgs {
     /// Server port (Windows supports only 53).
     #[arg(long, default_value_t = 53)]
     port: u16,
-    #[arg(long, default_value = "home.arpa")]
+    #[arg(long, default_value = crate::config::DEFAULT_ZONE)]
     zone: String,
     /// Change this device's DNS configuration (requires root or administrator).
     #[arg(long)]
@@ -57,7 +57,7 @@ pub struct SetupArgs {
 
 #[derive(Debug, Args)]
 pub struct RollbackArgs {
-    #[arg(long, default_value = "home.arpa")]
+    #[arg(long, default_value = crate::config::DEFAULT_ZONE)]
     zone: String,
     /// Show what would be removed without changing anything.
     #[arg(long)]

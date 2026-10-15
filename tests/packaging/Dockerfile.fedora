@@ -1,0 +1,6 @@
+FROM fedora:41
+RUN dnf install -y --setopt=install_weak_deps=False systemd bind-utils procps-ng util-linux && dnf clean all
+COPY tests/packaging/out/ /packages/
+COPY --chmod=0755 tests/packaging/rpm-*.sh /usr/local/bin/
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/usr/sbin/init"]

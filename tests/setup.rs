@@ -119,7 +119,7 @@ fn plan_names_one_router_action_and_changes_nothing() {
     ] {
         assert!(checks.contains(&id), "missing {id} in {checks:?}");
     }
-    assert_eq!(plan["data"]["host_record"], "localname.home.arpa.");
+    assert_eq!(plan["data"]["host_record"], "localname.lan.");
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn applied_setup_rolls_back_to_no_configuration() {
             .ends_with("setup rollback")
     );
     let records = json(&run(&path, &["list"]));
-    assert_eq!(records["data"][0]["name"], "localname.home.arpa.");
+    assert_eq!(records["data"][0]["name"], "localname.lan.");
     assert_eq!(records["data"][0]["value"], "192.168.1.10");
 
     let preview = json(&run(&path, &["setup", "rollback", "--dry-run"]));

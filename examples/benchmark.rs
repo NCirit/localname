@@ -146,7 +146,7 @@ async fn run() -> Result<()> {
                 let mut request = Message::query();
                 request.metadata.id = u16::try_from(index & usize::from(u16::MAX))?;
                 request.add_query(Query::query(
-                    Name::from_str(&format!("host{host}.home.arpa."))?,
+                    Name::from_str(&format!("host{host}.lan."))?,
                     RecordType::A,
                 ));
                 let bytes = request.to_vec()?;
@@ -235,14 +235,9 @@ fn resident_kb(pid: u32) -> Option<u64> {
 
 async fn wait_until_ready(address: SocketAddr) -> Result<()> {
     for _ in 0..200 {
-        if query_server(
-            address,
-            "home.arpa.",
-            RecordType::SOA,
-            Duration::from_millis(100),
-        )
-        .await
-        .is_ok()
+        if query_server(address, "lan.", RecordType::SOA, Duration::from_millis(100))
+            .await
+            .is_ok()
         {
             return Ok(());
         }

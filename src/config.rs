@@ -16,6 +16,10 @@ use crate::error::{ErrorCode, coded};
 
 pub const CURRENT_SCHEMA: u32 = 2;
 
+/// Zone for new configurations (decision 30). Stored explicitly, so changing it never
+/// moves existing installations.
+pub const DEFAULT_ZONE: &str = "lan";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -121,7 +125,7 @@ impl Default for Config {
         Self {
             schema: CURRENT_SCHEMA,
             revision: 0,
-            zone: "home.arpa".into(),
+            zone: DEFAULT_ZONE.into(),
             listen: vec![SocketAddr::from(([127, 0, 0, 1], 5354))],
             upstreams: vec![
                 SocketAddr::from(([1, 1, 1, 1], 53)),
@@ -801,6 +805,24 @@ impl ConfigStore {
 
 const TEMPORARY_PREFIX: &str = ".localname-";
 
+/// Atomically write a state file beside the configuration, owned like its directory.
+pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(directory)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(TEMPORARY_PREFIX)
+        .suffix(".tmp")
+        .tempfile_in(directory)?;
+    temporary.write_all(contents)?;
+    temporary.as_file().sync_all()?;
+    adopt_owner(temporary.as_file(), directory)?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    sync_parent(directory)
+}
+
 /// Parse a configuration, refusing schemas from newer releases instead of guessing.
 fn parse(text: &str) -> Result<Config> {
     let mut table: toml::Table = toml::from_str(text)?;
@@ -1046,7 +1068,7 @@ ttl = 60
     fn services_require_the_proxy_and_private_targets() {
         let mut config = proxied(vec![service("photos", "192.168.1.20:2342")]);
         config.validate().unwrap();
-        assert_eq!(config.services[0].name, "photos.home.arpa.");
+        assert_eq!(config.services[0].name, "photos.lan.");
         config.proxy_listen.clear();
         assert!(config.validate().is_err());
         assert!(

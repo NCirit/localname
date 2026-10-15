@@ -14,7 +14,7 @@ use crate::{
 const MAX_FRAME: usize = 32 * 1_048_576;
 
 /// Control protocol version. Increment when a request or response changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -201,6 +201,13 @@ fn connect(store: &ConfigStore) -> Result<Option<std::fs::File>> {
                 }
                 // The daemon is starting; its pipe appears shortly.
                 std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // The pipe admits only the daemon's own account and administrators.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(coded(
+                    ErrorCode::PermissionRequired,
+                    "permission required: the running localname was started by another account or as administrator; run this command the same way (for example from an administrator PowerShell)",
+                ));
             }
             Err(error) => return Err(error.into()),
         }

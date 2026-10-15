@@ -45,22 +45,22 @@ cp /tmp/baseline-dns /tmp/baseline-domain /var/tmp/
 # Plan changes nothing.
 localname client setup --server 127.0.0.1 --port 5354 --output json > /tmp/plan.json
 grep -q '"changed":true' /tmp/plan.json
-test ! -e /etc/systemd/resolved.conf.d/60-localname-home.arpa.conf
+test ! -e /etc/systemd/resolved.conf.d/60-localname-lan.conf
 
 # A server that does not answer is refused before anything changes.
 expect_exit 6 localname client setup --server 127.0.0.1 --port 9 --apply --timeout-ms 300 --output json
-test ! -e /etc/systemd/resolved.conf.d/60-localname-home.arpa.conf
+test ! -e /etc/systemd/resolved.conf.d/60-localname-lan.conf
 
 localname client setup --server 127.0.0.1 --port 5354 --apply --output json > /tmp/apply.json
 cat /tmp/apply.json
 grep -q '"changed":true' /tmp/apply.json
 grep -q '"status":"passed"' /tmp/apply.json
 grep -q 'unchanged' /tmp/apply.json
-getent hosts nas.home.arpa | grep -q 192.168.1.20
+getent hosts nas.lan | grep -q 192.168.1.20
 # The VPN link and search domains are exactly as before.
 resolvectl domain | grep 'vpn0' | grep -q 'corp.example'
 resolvectl domain | grep 'Global' | grep -q 'example.lan'
-resolvectl domain | grep 'Global' | grep -q '~home.arpa'
+resolvectl domain | grep 'Global' | grep -q '~lan'
 test "$(resolvectl dns | grep vpn0)" = "$(grep vpn0 /tmp/baseline-dns)"
 test "$(resolvectl domain | grep vpn0)" = "$(grep vpn0 /tmp/baseline-domain)"
 

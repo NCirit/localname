@@ -270,6 +270,35 @@ async fn local_ca_serves_trusted_https_and_rolls_back() {
     );
     assert!(http_get(proxy_address, "plain.home.arpa").starts_with("HTTP/1.1 200"));
 
+    // With HTTPS configured, a new service gets a certificate without further steps.
+    let added = run(&path, &["service", "add", "music", &target.to_string()]);
+    assert!(added.status.success(), "{added:?}");
+    let mut issued = false;
+    for _ in 0..50 {
+        if !certificate_of(&path, "music.home.arpa.")["certificate"].is_null() {
+            issued = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(issued, "new service has no certificate");
+    let response = https_get(address, "music.home.arpa", &ca_file(&path))
+        .await
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let http_only = run(
+        &path,
+        &[
+            "service",
+            "add",
+            "plain2",
+            &target.to_string(),
+            "--no-https",
+        ],
+    );
+    assert!(http_only.status.success(), "{http_only:?}");
+    assert!(http_get(proxy_address, "plain2.home.arpa").starts_with("HTTP/1.1 200"));
+
     // Forced renewal replaces the certificate.
     let before = certificate_of(&path, "photos.home.arpa.");
     let renewed = run(&path, &["https", "renew"]);

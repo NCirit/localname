@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn responses_are_never_answered() {
         let (_dir, server) = test_server();
-        let mut message = query("nas.home.arpa.", RecordType::A);
+        let mut message = query("nas.lan.", RecordType::A);
         message.metadata.message_type = MessageType::Response;
         assert!(answer(&server, &message).is_none());
     }
@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn unsupported_opcode_is_notimp() {
         let (_dir, server) = test_server();
-        let mut message = query("nas.home.arpa.", RecordType::A);
+        let mut message = query("nas.lan.", RecordType::A);
         message.metadata.op_code = OpCode::Update;
         assert_eq!(
             answer(&server, &message).unwrap().response_code,
@@ -823,13 +823,13 @@ mod tests {
     #[test]
     fn public_names_are_rebind_protected_except_allowed_domains() {
         let mut config = Config {
-            rebind_allowed_domains: vec!["lan".into()],
+            rebind_allowed_domains: vec!["fritz.box".into()],
             ..Config::default()
         };
         config.validate().unwrap();
         let (_dir, server) = server_with(config);
         assert!(forwarded(&server, "example.com.").rebind_protected);
-        assert!(!forwarded(&server, "printer.lan.").rebind_protected);
+        assert!(!forwarded(&server, "printer.fritz.box.").rebind_protected);
     }
 
     #[test]
@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn edns_answers_respect_requested_payload() {
         let (_dir, server) = test_server();
-        let mut message = query("nas.home.arpa.", RecordType::A);
+        let mut message = query("nas.lan.", RecordType::A);
         let mut edns = Edns::new();
         edns.set_max_payload(1232);
         message.set_edns(edns);
@@ -891,6 +891,7 @@ mod tests {
         ]);
         let suffixes = prop::sample::select(vec![
             "home.arpa.",
+            "lan.",
             "in-addr.arpa.",
             "localhost.",
             "invalid.",
@@ -961,7 +962,7 @@ mod tests {
         let stale = store.load().unwrap();
         let request = crate::control::Request::Add {
             record: RecordConfig {
-                name: "nas.home.arpa.".into(),
+                name: "nas.lan.".into(),
                 value: "192.168.1.20".into(),
                 ttl: 60,
             },
@@ -971,7 +972,7 @@ mod tests {
         let server = DnsServer::new(store.clone(), stale).unwrap();
         assert_eq!(server.snapshot.load().revision, 1);
         let remove = crate::control::Request::Remove {
-            name: "nas.home.arpa.".into(),
+            name: "nas.lan.".into(),
             value: None,
             expected_revision: Some(1),
         };

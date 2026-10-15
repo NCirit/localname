@@ -47,8 +47,8 @@ enum SetupAction {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct PlanArgs {
-    /// Namespace for short device names.
-    #[arg(long, default_value = "home.arpa")]
+    /// Namespace for short device names (`lan`, `home.arpa`, or a domain you own).
+    #[arg(long, default_value = crate::config::DEFAULT_ZONE)]
     zone: String,
     /// Only inspect; exit unsuccessfully if a blocking problem is found.
     #[arg(long, conflicts_with = "apply")]
@@ -895,12 +895,13 @@ fn verification_steps(advertise: Option<IpAddr>, host: Option<&str>, zone: &str)
         ];
     };
     let name = host.trim_end_matches('.');
-    let zone_argument =
-        if crate::config::canonical_zone(zone).is_ok_and(|zone| zone == "home.arpa.") {
-            String::new()
-        } else {
-            format!(" --zone {zone}")
-        };
+    let zone_argument = if crate::config::canonical_zone(zone)
+        .is_ok_and(|zone| zone.trim_end_matches('.') == crate::config::DEFAULT_ZONE)
+    {
+        String::new()
+    } else {
+        format!(" --zone {zone}")
+    };
     vec![
         format!(
             "On a second device run `localname setup verify{zone_argument}`: it finds localname through the network's DNS and checks UDP, TCP, and the system resolver."

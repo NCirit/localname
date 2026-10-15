@@ -6,7 +6,7 @@
 param([Parameter(Mandatory)][ValidateSet('before', 'after')][string]$Phase, [string]$Server)
 $ErrorActionPreference = 'Stop'
 $state = Join-Path $env:ProgramData 'localname-reboot-check'
-$name = 'localname.home.arpa'
+$name = 'localname.lan'
 function Get-Snapshot {
     Get-DnsClientNrptRule | Where-Object Comment -ne 'Managed by localname' |
         ForEach-Object { "nrpt $($_.Namespace) $($_.NameServers)" }

@@ -275,9 +275,10 @@ fn plan(output: OutputFormat, store: &ConfigStore, args: &PlanArgs, stage: Stage
         HttpsMode::LocalCa => {
             if create_ca {
                 steps.push(format!(
-                    "Create a CA on this host, limited to names under {} (its key stays in {}, readable only by the service account).",
+                    "Create a CA on this host, limited to names under {} (its key stays in {}, readable only by {}).",
                     next.zone.trim_end_matches('.'),
-                    tls::directory(path).display()
+                    tls::directory(path).display(),
+                    if cfg!(unix) { "the account that owns the configuration" } else { "your Windows account (profile permissions)" }
                 ));
             }
             steps.push(format!(
@@ -950,33 +951,39 @@ fn rollback(output: OutputFormat, store: &ConfigStore, args: &DryRunArgs) -> Res
             "conflict: the local CA is still trusted on this host; run `localname https trust remove` first",
         ));
     }
+    // Undo exactly what HTTPS added; records and services changed since stay as they are.
     let current = store.load()?;
-    if current.revision != record.revision {
-        return Err(coded(
-            ErrorCode::Conflict,
-            format!(
-                "stale revision conflict: the configuration changed after `https apply` (revision {} is now {}); use `localname rollback`",
-                record.revision, current.revision
-            ),
-        ));
-    }
     let deletes = record.created_key_directory || record.created_ca;
-    let data = json!({"restores_revision": record.previous_revision, "deletes_key_material": deletes, "key_directory": tls::directory(store.path())});
+    let services: Vec<String> = current
+        .services
+        .iter()
+        .filter(|service| service.https)
+        .map(|service| service.name.trim_end_matches('.').to_owned())
+        .collect();
+    let data = json!({
+        "removes_https": current.https.is_some(),
+        "services_back_to_http": services,
+        "deletes_key_material": deletes,
+        "key_directory": tls::directory(store.path()),
+    });
     if args.dry_run {
+        let human = format!(
+            "Would turn HTTPS off ({} back to plain HTTP) and {}.",
+            if services.is_empty() {
+                "no services".to_owned()
+            } else {
+                services.join(", ")
+            },
+            if deletes {
+                "delete the keys and certificates it created"
+            } else {
+                "keep existing key material"
+            }
+        );
         return print_result(
             output,
             Envelope::success("https rollback", true, Some(current.revision), data),
-            || {
-                format!(
-                    "Would restore revision {} and {}.",
-                    record.previous_revision,
-                    if deletes {
-                        "delete the keys and certificates it created"
-                    } else {
-                        "keep existing key material"
-                    }
-                )
-            },
+            || human,
         );
     }
     if control::send_if_running(store, &Request::Status)?.is_some() {
@@ -986,18 +993,24 @@ fn rollback(output: OutputFormat, store: &ConfigStore, args: &DryRunArgs) -> Res
         ));
     }
     let guard = store.acquire_offline_lock()?;
-    let (_, next) = store.rollback_expected(record.previous_revision, Some(record.revision))?;
+    let (previous, next) = store.mutate(None, |config| {
+        config.https = None;
+        for service in &mut config.services {
+            service.https = false;
+        }
+        Ok(())
+    })?;
     drop(guard);
     if deletes {
         tls::remove_material(store.path())?;
     }
     std::fs::remove_file(record_path(store))?;
     let mut envelope = Envelope::success("https rollback", true, Some(next.revision), data);
-    envelope.rollback = Some(rollback_command(store.path(), record.revision));
+    envelope.rollback = Some(rollback_command(store.path(), previous.revision));
     print_result(output, envelope, || {
         format!(
-            "Restored revision {} as revision {}.",
-            record.previous_revision, next.revision
+            "HTTPS is off as of revision {}; services are served over plain HTTP.",
+            next.revision
         )
     })
 }

@@ -40,6 +40,9 @@ pub struct AddArgs {
     name: String,
     /// Backend address and port on the LAN.
     target: SocketAddr,
+    /// Serve only over plain HTTP even though HTTPS is configured.
+    #[arg(long)]
+    no_https: bool,
     #[arg(long)]
     dry_run: bool,
     #[arg(long)]
@@ -139,10 +142,11 @@ fn daemon_running(store: &ConfigStore) -> Result<bool> {
 async fn add(output: OutputFormat, store: &ConfigStore, args: &AddArgs) -> Result<()> {
     let current = store.load()?;
     check_revision(args.expect_revision, current.revision)?;
+    // With an HTTPS trust mode configured, new services get certificates by default.
     let service = ServiceConfig {
         name: current.fqdn(&args.name)?,
         target: args.target,
-        https: false,
+        https: current.https.is_some() && !args.no_https,
     };
     let mut preview = current.clone();
     match preview

@@ -1,0 +1,140 @@
+name: Release
+# Tag vX.Y.Z to build, package, sign, attest, and publish a release. Every artifact gets
+# a Sigstore bundle (keyless, bound to this workflow) and a SLSA build-provenance
+# attestation; binaries ship with CycloneDX SBOMs and the image with buildx SBOM and
+# provenance. Verify with `cosign verify-blob --bundle FILE.sigstore.json ...` or
+# `gh attestation verify FILE --repo OWNER/localname`.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+  build:
+    needs: ci
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # The oldest supported runners keep the glibc requirement low.
+          - {os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, arch: x86_64, packages: true}
+          - {os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, arch: aarch64, packages: true}
+          - {os: macos-14, target: aarch64-apple-darwin, arch: aarch64}
+          - {os: macos-15-intel, target: x86_64-apple-darwin, arch: x86_64}
+          - {os: windows-2022, target: x86_64-pc-windows-msvc, arch: x86_64}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check the tag matches the crate version
+        shell: bash
+        run: test "v$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')" = "$GITHUB_REF_NAME"
+      - run: cargo build --locked --release --target ${{ matrix.target }} --bin localname
+      - name: Archive
+        shell: bash
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          name=localname-$version-${{ matrix.target }}
+          mkdir -p dist "$name"
+          binary=target/${{ matrix.target }}/release/localname
+          [ -f "$binary.exe" ] && binary=$binary.exe
+          cp "$binary" README.md "$name/"
+          cp -r skills packaging/systemd "$name/"
+          if [ "${{ runner.os }}" = Windows ]; then
+            7z a -tzip "dist/$name.zip" "$name" >/dev/null
+          else
+            tar -czf "dist/$name.tar.gz" "$name"
+          fi
+      - name: Linux packages
+        if: matrix.packages
+        run: |
+          sudo apt-get update && sudo apt-get install -y rpm
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) packaging/build-packages.sh "${GITHUB_REF_NAME#v}" ${{ matrix.arch }} target/${{ matrix.target }}/release/localname dist
+      - name: SBOM
+        shell: bash
+        run: |
+          cargo install cargo-cyclonedx --locked --version 0.5.7
+          cargo cyclonedx --format json --target ${{ matrix.target }} --override-filename "localname-${GITHUB_REF_NAME#v}-${{ matrix.target }}.cdx"
+          mv localname-*.cdx.json dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+  image:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          provenance: mode=max
+          sbom: true
+      - uses: sigstore/cosign-installer@v3
+      - run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+  publish:
+    needs: [build, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign every artifact
+        working-directory: dist
+        run: |
+          for file in *; do
+            case "$file" in *.sigstore.json) continue ;; esac
+            cosign sign-blob --yes --bundle "$file.sigstore.json" "$file" >/dev/null
+          done
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*'
+      - uses: actions/attest-sbom@v2
+        with:
+          subject-path: 'dist/*.tar.gz'
+          sbom-path: dist/localname-${{ env.VERSION }}-x86_64-unknown-linux-gnu.cdx.json
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "localname ${GITHUB_REF_NAME#v}" --generate-notes dist/*

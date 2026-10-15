@@ -4,3 +4,4 @@
 !Cargo.lock
 *.tmp
 .DS_Store
+/tests/packaging/out/

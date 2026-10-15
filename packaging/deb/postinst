@@ -1,0 +1,14 @@
+#!/bin/sh
+# Create the service account and state directory; restart a running service on upgrade.
+set -e
+if [ "$1" = configure ]; then
+    systemd-sysusers localname.conf
+    systemd-tmpfiles --create localname.conf
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        if [ -n "$2" ]; then
+            systemctl try-restart localname.service || true
+        fi
+    fi
+fi
+exit 0

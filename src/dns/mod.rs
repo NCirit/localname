@@ -469,7 +469,7 @@ mod tests {
     fn answers_local_a_and_ptr() {
         let snapshot = DnsSnapshot::from_config(&config_with_record()).unwrap();
         for (name, kind) in [
-            ("nas.home.arpa.", RecordType::A),
+            ("nas.lan.", RecordType::A),
             ("20.1.168.192.in-addr.arpa.", RecordType::PTR),
         ] {
             let mut request = Message::query();
@@ -503,7 +503,7 @@ mod tests {
         let snapshot = DnsSnapshot::from_config(&config_with_record()).unwrap();
         let mut request = Message::query();
         request.add_query(Query::query(
-            Name::from_str("missing.home.arpa.").unwrap(),
+            Name::from_str("missing.lan.").unwrap(),
             RecordType::A,
         ));
         let response = Message::from_vec(&local_response(&request, &snapshot).unwrap()).unwrap();
@@ -523,7 +523,7 @@ mod tests {
         let snapshot = DnsSnapshot::from_config(&config).unwrap();
         let mut request = Message::query();
         request.add_query(Query::query(
-            Name::from_str("storage.home.arpa.").unwrap(),
+            Name::from_str("storage.lan.").unwrap(),
             RecordType::A,
         ));
         let response = Message::from_vec(&local_response(&request, &snapshot).unwrap()).unwrap();
@@ -547,9 +547,9 @@ mod tests {
         });
         config.validate().unwrap();
         let snapshot = DnsSnapshot::from_config(&config).unwrap();
-        let entry = &snapshot.names["photos.media.home.arpa."];
+        let entry = &snapshot.names["photos.media.lan."];
         assert_eq!(entry.v4, vec![("127.0.0.1".parse().unwrap(), 60)]);
-        assert!(snapshot.names.contains_key("media.home.arpa."));
+        assert!(snapshot.names.contains_key("media.lan."));
     }
 
     #[test]

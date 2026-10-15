@@ -39,7 +39,7 @@ scutil --dns | grep -E 'search domain|domain   :' | sort -u > "$work/before"
 
 sudo "$bin" client setup --server 127.0.0.1 --port 5354 --apply --output json | tee "$work/apply.json"
 grep -q '"status":"passed"' "$work/apply.json"
-dscacheutil -q host -a name nas.home.arpa | grep -q 192.168.1.20
+dscacheutil -q host -a name nas.lan | grep -q 192.168.1.20
 sudo "$bin" client setup --server 127.0.0.1 --port 5354 --apply --output json | grep -q '"changed":false'
 
 # A foreign resolver file for the zone is never overwritten.
@@ -54,14 +54,14 @@ grep -q 'nameserver 10.9.9.9' /etc/resolver/dev.test
 # The configuration survives a restart of the system resolver.
 sudo launchctl kickstart -k system/com.apple.mDNSResponder
 for _ in $(seq 1 50); do
-    dscacheutil -q host -a name nas.home.arpa | grep -q 192.168.1.20 && break
+    dscacheutil -q host -a name nas.lan | grep -q 192.168.1.20 && break
     sleep 0.2
 done
-dscacheutil -q host -a name nas.home.arpa | grep -q 192.168.1.20
+dscacheutil -q host -a name nas.lan | grep -q 192.168.1.20
 
 sudo "$bin" client rollback --output json | tee "$work/rollback.json"
 grep -q '"status":"passed"' "$work/rollback.json"
-test ! -e /etc/resolver/home.arpa
+test ! -e /etc/resolver/lan
 grep -q 'nameserver 10.8.0.1' /etc/resolver/corp.example
 scutil --dns | grep -E 'search domain|domain   :' | sort -u | diff "$work/before" -
 echo "macOS client split DNS: applied, verified, idempotent, conflicts refused, rolled back"

@@ -31,7 +31,7 @@ pub struct VerifyArgs {
     server: Option<IpAddr>,
     #[arg(long, default_value_t = 53)]
     port: u16,
-    /// Zone to check. Defaults to the local configuration's zone, then home.arpa.
+    /// Zone to check. Defaults to the local configuration's zone, then lan.
     #[arg(long)]
     zone: Option<String>,
     /// Name to resolve, relative to the zone.
@@ -83,7 +83,7 @@ pub async fn verify(output: OutputFormat, store: &ConfigStore, args: &VerifyArgs
         args.zone
             .as_deref()
             .or(config.as_ref().map(|config| config.zone.as_str()))
-            .unwrap_or("home.arpa"),
+            .unwrap_or(crate::config::DEFAULT_ZONE),
     )?;
     let name = crate::config::canonical_name(&args.name, &zone)?;
     // Human-readable forms, without the root label's trailing dot.

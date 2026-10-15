@@ -7,6 +7,6 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 systemctl is-active localname
-dig +short @127.0.0.1 nas.home.arpa A | grep -qx 192.168.1.20
-dig +short @127.0.0.1 printer.home.arpa A | grep -qx 192.168.1.30
+dig +short @127.0.0.1 nas.lan A | grep -qx 192.168.1.20
+dig +short @127.0.0.1 printer.lan A | grep -qx 192.168.1.30
 echo "systemd unit: reboot persistence passed"

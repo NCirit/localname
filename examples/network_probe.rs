@@ -10,13 +10,9 @@ async fn main() -> anyhow::Result<()> {
         let address: SocketAddr = address.parse()?;
         let mut ready = false;
         for _ in 0..30 {
-            if let Ok(answer) = query_server(
-                address,
-                "home.arpa.",
-                RecordType::SOA,
-                Duration::from_secs(1),
-            )
-            .await
+            // The bootstrap container runs setup with the default zone.
+            if let Ok(answer) =
+                query_server(address, "lan.", RecordType::SOA, Duration::from_secs(1)).await
                 && answer.authoritative
                 && !answer.records.is_empty()
             {

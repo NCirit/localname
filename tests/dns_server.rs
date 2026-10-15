@@ -53,21 +53,16 @@ async fn answers_udp_and_tcp() {
     });
     let (_dir, listen, shutdown) = start_server(config).await;
 
-    let udp = query_server(
-        listen,
-        "nas.home.arpa.",
-        RecordType::A,
-        Duration::from_secs(1),
-    )
-    .await
-    .unwrap();
+    let udp = query_server(listen, "nas.lan.", RecordType::A, Duration::from_secs(1))
+        .await
+        .unwrap();
     assert_eq!(udp.answers.len(), 1);
     assert!(udp.authoritative);
 
     let mut query = Message::query();
     query.metadata.recursion_desired = true;
     query.add_query(Query::query(
-        Name::from_str("nas.home.arpa.").unwrap(),
+        Name::from_str("nas.lan.").unwrap(),
         RecordType::A,
     ));
     let bytes = query.to_vec().unwrap();
@@ -102,9 +97,9 @@ async fn local_negatives_work_without_upstream_and_malformed_packets_do_not_cras
         socket.send_to(&bytes, listen).await.unwrap();
     }
     for (name, kind, expected) in [
-        ("missing.home.arpa.", RecordType::A, "NXDomain"),
-        ("nas.home.arpa.", RecordType::AAAA, "NoError"),
-        ("home.arpa.", RecordType::SOA, "NoError"),
+        ("missing.lan.", RecordType::A, "NXDomain"),
+        ("nas.lan.", RecordType::AAAA, "NoError"),
+        ("lan.", RecordType::SOA, "NoError"),
     ] {
         let result = query_server(listen, name, kind, Duration::from_secs(1))
             .await
@@ -181,7 +176,7 @@ async fn udp_size_limit_sets_truncation_and_tcp_returns_complete_answer() {
     let (_dir, listen, shutdown) = start_server(config).await;
     let mut query = Message::query();
     query.add_query(Query::query(
-        Name::from_str("cluster.home.arpa.").unwrap(),
+        Name::from_str("cluster.lan.").unwrap(),
         RecordType::A,
     ));
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -198,7 +193,7 @@ async fn udp_size_limit_sets_truncation_and_tcp_returns_complete_answer() {
     assert!(Message::from_vec(&buffer[..size]).unwrap().truncation);
     let complete = query_server(
         listen,
-        "cluster.home.arpa.",
+        "cluster.lan.",
         RecordType::A,
         Duration::from_secs(1),
     )
@@ -225,7 +220,7 @@ async fn live_control_change_is_immediately_visible() {
             &store,
             &Request::Add {
                 record: RecordConfig {
-                    name: "live.home.arpa.".into(),
+                    name: "live.lan.".into(),
                     value: "192.168.1.44".into(),
                     ttl: 60,
                 },
@@ -238,14 +233,9 @@ async fn live_control_change_is_immediately_visible() {
     .await
     .unwrap();
     assert_eq!(next.config.revision, 1);
-    let result = query_server(
-        listen,
-        "live.home.arpa.",
-        RecordType::A,
-        Duration::from_secs(1),
-    )
-    .await
-    .unwrap();
+    let result = query_server(listen, "live.lan.", RecordType::A, Duration::from_secs(1))
+        .await
+        .unwrap();
     assert_eq!(result.answers.len(), 1);
     shutdown.send(true).unwrap();
 }
@@ -257,21 +247,16 @@ async fn external_edits_reload_and_invalid_edits_keep_the_previous_revision() {
     let mut edited = ConfigStore::new(&path).load().unwrap();
     edited.revision = 1;
     edited.records.push(RecordConfig {
-        name: "edited.home.arpa.".into(),
+        name: "edited.lan.".into(),
         value: "192.168.1.50".into(),
         ttl: 60,
     });
     std::fs::write(&path, toml::to_string(&edited).unwrap()).unwrap();
     let mut served = false;
     for _ in 0..40 {
-        let result = query_server(
-            listen,
-            "edited.home.arpa.",
-            RecordType::A,
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
+        let result = query_server(listen, "edited.lan.", RecordType::A, Duration::from_secs(1))
+            .await
+            .unwrap();
         if result.answers.len() == 1 {
             served = true;
             break;
@@ -282,14 +267,9 @@ async fn external_edits_reload_and_invalid_edits_keep_the_previous_revision() {
 
     std::fs::write(&path, "zone = \"home.arpa\"\nlisten = [\"8.8.8.8:53\"]\n").unwrap();
     time::sleep(Duration::from_millis(2_500)).await;
-    let result = query_server(
-        listen,
-        "edited.home.arpa.",
-        RecordType::A,
-        Duration::from_secs(1),
-    )
-    .await
-    .unwrap();
+    let result = query_server(listen, "edited.lan.", RecordType::A, Duration::from_secs(1))
+        .await
+        .unwrap();
     assert_eq!(
         result.answers.len(),
         1,
@@ -364,7 +344,7 @@ async fn local_answers_stay_fast_while_upstreams_are_down() {
         let mut request = Message::query();
         request.metadata.id = 10_000 + index;
         request.add_query(Query::query(
-            Name::from_str("nas.home.arpa.").unwrap(),
+            Name::from_str("nas.lan.").unwrap(),
             RecordType::A,
         ));
         let started = std::time::Instant::now();

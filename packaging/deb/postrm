@@ -1,0 +1,13 @@
+#!/bin/sh
+# Removal keeps /var/lib/localname; purge deletes it and the service account.
+set -e
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/localname
+    if getent passwd localname >/dev/null; then
+        userdel localname >/dev/null 2>&1 || true
+    fi
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0

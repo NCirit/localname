@@ -285,7 +285,7 @@ fn rollback_previews_and_checks_revisions() {
     assert_eq!(restored["revision"], 3);
     assert_eq!(
         restored["data"]["records_removed"][0]["name"],
-        "printer.home.arpa."
+        "printer.lan."
     );
     assert!(
         restored["rollback"]

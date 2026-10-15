@@ -6,11 +6,11 @@
 #   sudo tests/client/reboot-check.sh after              # verifies, rolls back, compares
 set -euo pipefail
 state=/var/tmp/localname-reboot-check
-name=localname.home.arpa
+name=localname.lan
 snapshot() {
     if [ "$(uname)" = Darwin ]; then
         scutil --dns | grep -E 'search domain|domain   :|nameserver' | sort -u
-        ls /etc/resolver 2>/dev/null | grep -vx home.arpa || true
+        ls /etc/resolver 2>/dev/null | grep -vx lan || true
     else
         resolvectl dns
         resolvectl domain

@@ -1,5 +1,5 @@
 name: Rust
-on: [push, pull_request]
+on: [push, pull_request, workflow_call]
 permissions:
   contents: read
 jobs:
@@ -93,6 +93,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: tests/https/run.sh
+  packages:
+    # .deb and .rpm install, upgrade from 0.1.0 (config schema 1), reboot, removal, and
+    # purge under systemd, plus the container volume upgrade (M5).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: tests/packaging/run.sh
+      - run: tests/packaging/container-upgrade.sh
+  soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release --bin localname --example soak
+      - run: target/release/examples/soak
+        env:
+          LOCALNAME_SOAK_SECONDS: "120"
+          LOCALNAME_SOAK_BUDGET: "1"
   benchmark:
     # Performance budgets (see README): local answers p99 <= 5 ms at a paced 10k queries/s
     # with 10k records, server RSS <= 64 MiB, release binary <= 10 MiB, zero errors.

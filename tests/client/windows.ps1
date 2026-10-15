@@ -40,8 +40,8 @@ try {
 
     $apply = Invoke-Localname client setup --server 127.0.0.1 --apply --output json | ConvertFrom-Json
     if ($apply.verification.status -ne 'passed') { throw "verification failed: $($apply | ConvertTo-Json -Depth 8)" }
-    $answer = Resolve-DnsName nas.home.arpa -Type A -DnsOnly
-    if ($answer.IPAddress -notcontains '192.168.1.20') { throw 'nas.home.arpa did not resolve' }
+    $answer = Resolve-DnsName nas.lan -Type A -DnsOnly
+    if ($answer.IPAddress -notcontains '192.168.1.20') { throw 'nas.lan did not resolve' }
     $again = Invoke-Localname client setup --server 127.0.0.1 --apply --output json | ConvertFrom-Json
     if ($again.changed) { throw 'repeated apply changed state' }
     Invoke-LocalnameExpecting 3 client setup --server 127.0.0.1 --port 5354 --zone dev.test --apply --output json

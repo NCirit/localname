@@ -1,0 +1,11 @@
+# Build a release binary on Debian bookworm, so it runs on the oldest supported glibc.
+FROM rust:1.88-slim-bookworm AS build
+ARG CACHE=new
+WORKDIR /build
+COPY . .
+RUN --mount=type=cache,id=localname-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=localname-package-${CACHE},target=/build/target \
+    cargo build --locked --release --bin localname && cp target/release/localname /localname
+
+FROM scratch AS export
+COPY --from=build /localname /localname

@@ -64,6 +64,11 @@ echo "matrix: repeated apply is idempotent"
 
 # Reboot persistence.
 reboot_router
+# dnsmasq's running configuration is regenerated during boot; wait for it.
+for _ in $(seq 1 30); do
+    [ "$(admin status | field "d['data']['state']")" = applied ] && break
+    sleep 1
+done
 test "$(admin status | field "d['data']['state']")" = applied
 test "$(lease_dns)" = 10.56.0.20
 echo "matrix: change persisted across router reboot"

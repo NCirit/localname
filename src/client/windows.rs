@@ -20,21 +20,34 @@ struct Rule {
     comment: Option<String>,
 }
 
-/// `ConvertTo-Json` emits a single value instead of a one-element array.
+/// `ConvertTo-Json` emits a single value instead of a one-element array, and on some
+/// Windows versions serializes addresses as `System.Net.IPAddress` objects.
 fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     #[derive(Deserialize)]
     #[serde(untagged)]
+    enum Item {
+        Text(String),
+        Address {
+            #[serde(rename = "IPAddressToString")]
+            text: String,
+        },
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
     enum Value {
-        One(String),
-        Many(Vec<String>),
+        One(Item),
+        Many(Vec<Item>),
         Null(()),
     }
+    let text = |item: Item| match item {
+        Item::Text(text) | Item::Address { text } => text,
+    };
     Ok(match Value::deserialize(deserializer)? {
-        Value::One(value) => vec![value],
-        Value::Many(values) => values,
+        Value::One(item) => vec![text(item)],
+        Value::Many(items) => items.into_iter().map(text).collect(),
         Value::Null(()) => Vec::new(),
     })
 }
@@ -58,7 +71,7 @@ fn powershell(script: &str) -> Result<String> {
 
 fn rules() -> Result<Vec<Rule>> {
     let text = powershell(
-        "@(Get-DnsClientNrptRule | Select-Object Name, Namespace, NameServers, Comment) | ConvertTo-Json -Depth 3 -Compress",
+        "@(Get-DnsClientNrptRule | Select-Object Name, @{n='Namespace';e={@($_.Namespace | ForEach-Object { [string]$_ })}}, @{n='NameServers';e={@($_.NameServers | ForEach-Object { [string]$_ })}}, Comment) | ConvertTo-Json -Depth 3 -Compress",
     )?;
     let text = text.trim();
     if text.is_empty() {
@@ -191,5 +204,11 @@ mod tests {
         .unwrap();
         assert_eq!(many[0].namespace.len(), 2);
         assert!(!is_ours(&many[0]));
+        // Windows 11 serializes NameServers as IPAddress objects.
+        let object: Rule = serde_json::from_str(
+            r#"{"Name":"{0A9020C7}","Namespace":[".home.arpa"],"NameServers":{"Address":16777343,"AddressFamily":2,"ScopeId":null,"IPAddressToString":"127.0.0.1"},"Comment":"Managed by localname"}"#,
+        )
+        .unwrap();
+        assert_eq!(object.name_servers, ["127.0.0.1"]);
     }
 }

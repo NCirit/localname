@@ -1,3 +1,4 @@
+mod backup;
 mod client;
 mod health;
 #[cfg(feature = "https")]
@@ -105,6 +106,11 @@ enum Command {
     Router {
         #[command(subcommand)]
         command: router::RouterCommand,
+    },
+    /// Back up or restore the configuration, its revisions, and integration records.
+    Backup {
+        #[command(subcommand)]
+        command: backup::BackupCommand,
     },
     /// Validate configuration.
     Config {
@@ -333,6 +339,7 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
         Command::Https { command } => https::run(output, non_interactive, &store, command).await,
         Command::Client { command } => client::run(output, &command).await,
         Command::Router { command } => router::run(output, non_interactive, &store, command).await,
+        Command::Backup { command } => backup::run(output, &store, &command),
         Command::Config { command } => config_command(output, &store, command),
     }
 }
@@ -470,6 +477,13 @@ pub(crate) fn check_revision(expected: Option<u64>, current: u64) -> Result<()> 
 /// A shell command that restores `revision` for the exact configuration that was changed.
 pub(crate) fn rollback_command(path: &Path, revision: u64) -> String {
     let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // Windows canonical paths are verbatim (`\\?\C:\...`); show the ordinary form.
+    #[cfg(windows)]
+    let absolute = absolute
+        .to_str()
+        .and_then(|text| text.strip_prefix(r"\\?\"))
+        .filter(|rest| !rest.starts_with("UNC\\"))
+        .map_or(absolute.clone(), std::path::PathBuf::from);
     #[cfg(unix)]
     let quoted = format!("'{}'", absolute.to_string_lossy().replace('\'', "'\\''"));
     #[cfg(not(unix))]
