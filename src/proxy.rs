@@ -52,9 +52,16 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
+struct Route {
+    target: SocketAddr,
+    https: bool,
+}
+
 struct Routes {
-    services: HashMap<String, SocketAddr>,
+    services: HashMap<String, Route>,
     allowed_clients: Vec<ipnet::IpNet>,
+    /// Port of the first HTTPS listener, used to redirect HTTPS services.
+    https_port: Option<u16>,
 }
 
 impl Routes {
@@ -63,9 +70,22 @@ impl Routes {
             services: config
                 .services
                 .iter()
-                .map(|service| (service.name.clone(), service.target))
+                .map(|service| {
+                    (
+                        service.name.clone(),
+                        Route {
+                            target: service.target,
+                            https: service.https,
+                        },
+                    )
+                })
                 .collect(),
             allowed_clients: config.allowed_clients.clone(),
+            https_port: config
+                .https
+                .as_ref()
+                .and_then(|https| https.listen.first())
+                .map(SocketAddr::port),
         }
     }
 }
@@ -138,6 +158,41 @@ fn add(counter: &AtomicU64) {
 pub async fn serve(
     proxy: Arc<Proxy>,
     listener: TcpListener,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    serve_with(proxy, listener, None, shutdown).await
+}
+
+/// Serve HTTPS on `listener`, choosing certificates by SNI.
+#[cfg(feature = "https")]
+pub async fn serve_tls(
+    proxy: Arc<Proxy>,
+    listener: TcpListener,
+    certificates: Arc<crate::tls::manager::CertManager>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_cert_resolver(certificates);
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    serve_with(proxy, listener, Some(acceptor), shutdown).await
+}
+
+#[cfg(not(feature = "https"))]
+type Acceptor = std::convert::Infallible;
+#[cfg(feature = "https")]
+type Acceptor = tokio_rustls::TlsAcceptor;
+
+#[cfg(feature = "https")]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn serve_with(
+    proxy: Arc<Proxy>,
+    listener: TcpListener,
+    acceptor: Option<Acceptor>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut connections = JoinSet::new();
@@ -152,17 +207,20 @@ pub async fn serve(
                     continue;
                 };
                 let proxy = Arc::clone(&proxy);
+                #[cfg_attr(not(feature = "https"), allow(clippy::clone_on_copy))]
+                let acceptor = acceptor.clone();
                 connections.spawn(async move {
                     let _permit = permit;
-                    let service = service_fn(move |request| handle(Arc::clone(&proxy), peer, request));
-                    let connection = http1::Builder::new()
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(HEADER_TIMEOUT)
-                        .max_buf_size(MAX_HEADER_BYTES)
-                        .serve_connection(TokioIo::new(stream), service)
-                        .with_upgrades();
-                    if let Err(error) = connection.await {
-                        debug!(%error, %peer, "proxy connection ended");
+                    match acceptor {
+                        None => serve_connection(proxy, peer, stream, false).await,
+                        #[cfg(feature = "https")]
+                        Some(acceptor) => match time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                            Ok(Ok(stream)) => serve_connection(proxy, peer, stream, true).await,
+                            Ok(Err(error)) => debug!(%error, %peer, "TLS handshake failed"),
+                            Err(_) => debug!(%peer, "TLS handshake timed out"),
+                        },
+                        #[cfg(not(feature = "https"))]
+                        Some(never) => match never {},
                     }
                 });
             }
@@ -171,6 +229,22 @@ pub async fn serve(
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     Ok(())
+}
+
+async fn serve_connection<S>(proxy: Arc<Proxy>, peer: SocketAddr, stream: S, secure: bool)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = service_fn(move |request| handle(Arc::clone(&proxy), peer, request, secure));
+    let connection = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT)
+        .max_buf_size(MAX_HEADER_BYTES)
+        .serve_connection(TokioIo::new(stream), service)
+        .with_upgrades();
+    if let Err(error) = connection.await {
+        debug!(%error, %peer, "proxy connection ended");
+    }
 }
 
 fn text(status: StatusCode, message: String) -> Response<Body> {
@@ -217,6 +291,7 @@ async fn handle(
     proxy: Arc<Proxy>,
     peer: SocketAddr,
     request: Request<Incoming>,
+    secure: bool,
 ) -> Result<Response<Body>, Infallible> {
     add(&proxy.metrics.requests);
     let routes = proxy.routes.load();
@@ -238,7 +313,7 @@ async fn handle(
             "localname: the request has no Host header".into(),
         ));
     };
-    let Some(target) = routes.services.get(&host).copied() else {
+    let Some(route) = routes.services.get(&host) else {
         add(&proxy.metrics.not_found);
         return Ok(text(
             StatusCode::NOT_FOUND,
@@ -248,22 +323,44 @@ async fn handle(
             ),
         ));
     };
-    drop(routes);
+    let target = route.target;
     let name = host.trim_end_matches('.').to_owned();
-    Ok(match forward(&proxy, peer, &name, target, request).await {
-        Ok(response) => response,
-        Err(failure) => {
-            add(&proxy.metrics.backend_errors);
-            debug!(service = %name, %target, error = %failure.detail, "backend failed");
-            text(
-                failure.status,
-                format!(
-                    "localname: backend for {name} ({target}) {}",
-                    failure.detail
-                ),
-            )
+    // HTTPS services are reached over HTTP only to be redirected.
+    if route.https && !secure {
+        let port = routes
+            .https_port
+            .filter(|port| *port != 443)
+            .map_or_else(String::new, |port| format!(":{port}"));
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", |path| path.as_str());
+        let mut response = text(
+            StatusCode::PERMANENT_REDIRECT,
+            format!("localname: {name} is served over HTTPS"),
+        );
+        if let Ok(location) = HeaderValue::from_str(&format!("https://{name}{port}{path}")) {
+            response.headers_mut().insert(header::LOCATION, location);
         }
-    })
+        return Ok(response);
+    }
+    drop(routes);
+    Ok(
+        match forward(&proxy, peer, &name, target, request, secure).await {
+            Ok(response) => response,
+            Err(failure) => {
+                add(&proxy.metrics.backend_errors);
+                debug!(service = %name, %target, error = %failure.detail, "backend failed");
+                text(
+                    failure.status,
+                    format!(
+                        "localname: backend for {name} ({target}) {}",
+                        failure.detail
+                    ),
+                )
+            }
+        },
+    )
 }
 
 struct Failure {
@@ -337,6 +434,7 @@ async fn forward(
     name: &str,
     target: SocketAddr,
     mut request: Request<Incoming>,
+    secure: bool,
 ) -> Result<Response<Body>, Failure> {
     let upgrade = is_upgrade(request.headers());
     let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut request));
@@ -380,7 +478,10 @@ async fn forward(
     if let Ok(value) = HeaderValue::from_str(name) {
         headers.insert("x-forwarded-host", value);
     }
-    headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+    headers.insert(
+        "x-forwarded-proto",
+        HeaderValue::from_static(if secure { "https" } else { "http" }),
+    );
 
     let mut response = match time::timeout(RESPONSE_TIMEOUT, sender.send_request(request)).await {
         Ok(Ok(response)) => response,

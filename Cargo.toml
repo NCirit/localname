@@ -18,15 +18,24 @@ http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", default-features = false, features = ["http1", "server", "client"], optional = true }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"], optional = true }
 if-addrs = "0.15"
+instant-acme = { version = "0.8", default-features = false, features = ["ring"], optional = true }
 ipnet = { version = "2.11", features = ["serde"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"], optional = true }
+ring = { version = "0.17", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+rustls-pemfile = { version = "2", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.23"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util", "fs"] }
+time = { version = "0.3", default-features = false, features = ["std"], optional = true }
+tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util", "fs", "process"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+x509-parser = { version = "0.18", optional = true }
 
 [dev-dependencies]
 proptest = "1.9"
@@ -50,7 +59,8 @@ must_use_candidate = "allow"
 nix = { version = "0.30", default-features = false, features = ["user", "fs"] }
 
 [features]
-default = ["proxy"]
+default = ["proxy", "https"]
 # HTTP/WebSocket service proxy (decision 10: optional; DNS-only builds omit it).
 proxy = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
-
+# HTTPS for proxied services with explicit trust modes (M4b).
+https = ["proxy", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:instant-acme", "dep:x509-parser", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:time", "dep:ring"]

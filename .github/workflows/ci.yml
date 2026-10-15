@@ -25,7 +25,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: "! cargo tree --locked --no-default-features -e normal | grep -E 'hyper|http-body'"
+      - run: "! cargo tree --locked --no-default-features -e normal | grep -E 'hyper|http-body|rustls|ring'"
+      - run: "! cargo tree --locked --no-default-features -F proxy -e normal | grep -E 'rustls|ring|rcgen|acme'"
       - run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
       - run: cargo test --locked --no-default-features --all-targets
   msrv:
@@ -85,6 +86,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: tests/router/run.sh
+  https:
+    # ACME DNS-01 against Pebble with strict validation, and the local CA in the Debian
+    # system trust store with confirmed install, removal, and rollback (M4b).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/https/run.sh
   benchmark:
     # Performance budgets (see README): local answers p99 <= 5 ms at a paced 10k queries/s
     # with 10k records, server RSS <= 64 MiB, release binary <= 10 MiB, zero errors.

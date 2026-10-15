@@ -1,5 +1,7 @@
 mod client;
 mod health;
+#[cfg(feature = "https")]
+mod https;
 mod records;
 mod router;
 mod services;
@@ -82,6 +84,12 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: services::ServiceCommand,
+    },
+    /// Serve proxied services over HTTPS with an explicit trust mode.
+    #[cfg(feature = "https")]
+    Https {
+        #[command(subcommand)]
+        command: https::HttpsCommand,
     },
     /// Turn the optional HTTP/WebSocket proxy on or off.
     Proxy {
@@ -321,6 +329,8 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
         Command::Rollback(args) => records::rollback(output, &store, &args).await,
         Command::Service { command } => services::service(output, &store, command).await,
         Command::Proxy { command } => services::proxy(output, &store, &command),
+        #[cfg(feature = "https")]
+        Command::Https { command } => https::run(output, non_interactive, &store, command).await,
         Command::Client { command } => client::run(output, &command).await,
         Command::Router { command } => router::run(output, non_interactive, &store, command).await,
         Command::Config { command } => config_command(output, &store, command),

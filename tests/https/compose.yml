@@ -1,0 +1,33 @@
+# ACME DNS-01 scenario (M4b): Pebble validates strictly through challtestsrv, which the
+# localname host's DNS-01 hook updates.
+services:
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
+    command: ["-defaultIPv4", "10.57.0.10", "-defaultIPv6", "", "-dnsserver", ":8053", "-management", ":8055", "-http01", "", "-https01", "", "-tlsalpn01", "", "-doh", ""]
+    networks:
+      net:
+        ipv4_address: 10.57.0.3
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: ["-config", "/test/config/pebble-config.json", "-dnsserver", "10.57.0.3:8053", "-strict"]
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    networks:
+      net:
+        ipv4_address: 10.57.0.2
+  host:
+    build:
+      context: ../..
+      dockerfile: tests/https/Dockerfile
+    entrypoint: ["/usr/local/bin/acme-scenario"]
+    depends_on: [pebble, challtestsrv]
+    networks:
+      net:
+        ipv4_address: 10.57.0.10
+networks:
+  net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.57.0.0/24

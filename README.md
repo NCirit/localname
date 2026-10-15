@@ -86,7 +86,7 @@ localname service list
 localname service remove photos
 ```
 
-A service name resolves to the proxy, which routes requests by their `Host` header and passes WebSocket upgrades through. Backends must be on private addresses; only clients in `allowed_clients` may use the proxy. The proxy is off by default: without `proxy_listen`, localname opens no HTTP port and starts no proxy task, and `cargo build --no-default-features` leaves the proxy out entirely. `localname proxy disable` returns to DNS-only mode once no services remain. HTTPS for services is not available yet.
+A service name resolves to the proxy, which routes requests by their `Host` header and passes WebSocket upgrades through. Backends must be on private addresses; only clients in `allowed_clients` may use the proxy. The proxy is off by default: without `proxy_listen`, localname opens no HTTP port and starts no proxy task, and `cargo build --no-default-features` leaves the proxy out entirely. `localname proxy disable` returns to DNS-only mode once no services remain. For HTTPS, see below.
 
 When a backend fails, the proxy answers with a short plain-text error naming the service and backend:
 
@@ -100,6 +100,26 @@ When a backend fails, the proxy answers with a short plain-text error naming the
 | Backend fails while sending a response | The client connection is closed |
 
 `localname service add` checks that the name resolves to the proxy and that the proxy routes it; an unreachable backend is reported as a warning. `localname status` shows aggregate proxy counters.
+
+### HTTPS for services
+
+HTTPS needs someone to vouch for the certificate, and localname never decides that silently. Pick one trust mode:
+
+- **Local CA** (`--mode local-ca`) — for `home.arpa` and other private zones. localname creates a CA on this host that can only sign names under your zone (an X.509 name constraint), so trusting it cannot vouch for any public site. Its private key stays in an owner-only directory beside the configuration and is never printed, exported, or copied; `localname https ca-cert` gives you only the public certificate to install on phones and other computers.
+- **ACME DNS-01** (`--mode acme-dns01`) — for a domain you own, such as `home.example.com` used as the zone. Certificates come from Let's Encrypt (or `--acme-directory`) and are trusted everywhere. You supply a hook program that localname runs as `HOOK set|clear _acme-challenge.NAME VALUE` to publish TXT records with your DNS provider; provider credentials stay with the hook. You must pass `--agree-tos` to accept the CA's terms.
+
+```console
+localname https plan --mode local-ca            # shows every change; changes nothing
+sudo systemctl stop localname
+localname https apply --mode local-ca
+sudo systemctl start localname
+localname https verify                          # TLS handshake per service against the CA
+sudo localname https trust install --dry-run    # shows the exact trust-store command
+sudo localname https trust install              # asks you to type "yes" (or pass --yes)
+localname https ca-cert --out home-ca.crt       # public certificate for other devices
+```
+
+Services listed with `--service` (default: all) are served on port 443 of the proxy address; plain HTTP requests for them redirect to HTTPS. Certificates last 90 days (local CA) or the ACME CA's lifetime, renew 30 days before expiry, and survive restarts; `localname https renew` renews immediately and `localname https status` shows expiry and the last error. Trust-store changes happen only through `https trust install` and `https trust remove` — on Linux the system store (`update-ca-certificates` or `update-ca-trust`), on macOS the login keychain, on Windows the current user's root store, which shows its own confirmation dialog. Firefox keeps a separate store. `localname https rollback` restores the configuration from before `https apply` and deletes the keys and certificates it created; it refuses while the CA is still trusted on this host.
 
 The CLI supports IPv4/IPv6 address records, local aliases, reverse lookup, upstream forwarding, bounded caching, live record reload, previews, and revision rollback. Use `--config PATH` to select a configuration file and `--output json` for automation.
 
@@ -144,5 +164,5 @@ The benchmark starts the release binary as a separate server with 10,000 records
 
 DNS behavior is pinned by `tests/fixtures/conformance.toml`, which runs every case over UDP and TCP.
 
-This is an early development release. Trusted HTTPS is still being implemented.
+This is an early development release.
 

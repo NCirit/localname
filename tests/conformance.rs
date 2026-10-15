@@ -36,11 +36,7 @@ fn record_type(text: &str) -> RecordType {
 async fn fixtures_hold_over_udp_and_tcp() {
     let fixture: Fixture =
         toml::from_str(include_str!("fixtures/conformance.toml")).expect("valid fixture file");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = dual_port();
     let listen: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut config: Config = fixture.config.try_into().expect("fixture config");
     config.listen = vec![listen];
@@ -50,13 +46,21 @@ async fn fixtures_hold_over_udp_and_tcp() {
     store.initialize(&config).unwrap();
     let server = DnsServer::new(store, config).unwrap();
     let (shutdown, receiver) = watch::channel(false);
-    tokio::spawn(server.run(receiver));
+    let running = tokio::spawn(server.run(receiver));
+    let mut ready = false;
     for _ in 0..100 {
         if TcpStream::connect(listen).await.is_ok() {
+            ready = true;
             break;
         }
+        assert!(
+            !running.is_finished(),
+            "DNS server stopped: {:?}",
+            running.await
+        );
         time::sleep(Duration::from_millis(10)).await;
     }
+    assert!(ready, "DNS server did not start on {listen}");
 
     let mut failures = Vec::new();
     for case in &fixture.case {
@@ -97,4 +101,16 @@ async fn fixtures_hold_over_udp_and_tcp() {
         "conformance failures:\n{}",
         failures.join("\n")
     );
+}
+
+/// A loopback port free for both UDP and TCP: DNS listens on both, and a port free for
+/// one transport can be taken for the other.
+fn dual_port() -> u16 {
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }

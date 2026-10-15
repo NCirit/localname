@@ -48,6 +48,8 @@ pub enum Request {
         #[serde(default)]
         expected_revision: Option<u64>,
     },
+    /// Renew every HTTPS certificate now; the result shows in later status responses.
+    RenewCertificates,
     Status,
 }
 
@@ -81,7 +83,18 @@ pub struct DaemonStatus {
     /// Service proxy counters; absent in DNS-only mode.
     #[serde(default)]
     pub proxy: Option<ProxyStatus>,
+    /// HTTPS certificates; absent without an HTTPS trust mode.
+    #[serde(default)]
+    pub certificates: Option<Vec<CertStatus>>,
 }
+
+#[cfg(feature = "https")]
+pub use crate::tls::manager::CertStatus;
+
+/// Placeholder in builds without HTTPS: the field is always `None`.
+#[cfg(not(feature = "https"))]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CertStatus {}
 
 #[cfg(feature = "proxy")]
 pub use crate::proxy::ProxyStatus;
@@ -313,10 +326,10 @@ pub fn apply(store: &ConfigStore, request: Request) -> Result<Applied> {
             config.services.retain(|service| service.name != name);
             Ok(())
         })?,
-        Request::Status => {
+        Request::Status | Request::RenewCertificates => {
             return Err(coded(
                 ErrorCode::Unavailable,
-                "DNS service unavailable: status requires a running daemon",
+                "DNS service unavailable: this request requires a running daemon",
             ));
         }
     };
@@ -376,6 +389,22 @@ where
             status: Some(server.daemon_status()),
             ..Response::default()
         },
+        Ok(Frame {
+            body: Request::RenewCertificates,
+            ..
+        }) => {
+            if server.renew_certificates() {
+                Response {
+                    status: Some(server.daemon_status()),
+                    ..Response::default()
+                }
+            } else {
+                error_response(&coded(
+                    ErrorCode::InvalidInput,
+                    "invalid request: HTTPS is not configured",
+                ))
+            }
+        }
         Ok(frame) => {
             let request_store = server.store().clone();
             match tokio::task::spawn_blocking(move || apply(&request_store, frame.body)).await? {

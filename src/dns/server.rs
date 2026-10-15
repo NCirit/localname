@@ -43,6 +43,8 @@ pub struct Listeners {
     bound: Vec<(SocketAddr, UdpSocket, TcpListener)>,
     /// Service proxy listeners; empty in DNS-only mode.
     proxy: Vec<(SocketAddr, TcpListener)>,
+    /// HTTPS proxy listeners; empty unless an HTTPS trust mode is configured.
+    https: Vec<(SocketAddr, TcpListener)>,
 }
 
 impl Listeners {
@@ -60,6 +62,7 @@ impl Listeners {
         Ok(Self {
             bound,
             proxy: Vec::new(),
+            https: Vec::new(),
         })
     }
 
@@ -72,6 +75,12 @@ impl Listeners {
                 .with_context(|| format!("failed to bind proxy TCP {address}"))?;
             listeners.proxy.push((*address, tcp));
         }
+        for address in https_listen(config) {
+            let tcp = TcpListener::bind(address)
+                .await
+                .with_context(|| format!("failed to bind HTTPS TCP {address}"))?;
+            listeners.https.push((address, tcp));
+        }
         Ok(listeners)
     }
 
@@ -82,6 +91,18 @@ impl Listeners {
     pub fn proxy_addresses(&self) -> Vec<SocketAddr> {
         self.proxy.iter().map(|(address, _)| *address).collect()
     }
+
+    pub fn https_addresses(&self) -> Vec<SocketAddr> {
+        self.https.iter().map(|(address, _)| *address).collect()
+    }
+}
+
+fn https_listen(config: &Config) -> Vec<SocketAddr> {
+    config
+        .https
+        .as_ref()
+        .map(|https| https.listen.clone())
+        .unwrap_or_default()
 }
 
 pub struct DnsServer {
@@ -99,6 +120,10 @@ pub struct DnsServer {
     tcp_connections: Arc<Semaphore>,
     tcp_clients: Mutex<HashMap<IpAddr, usize>>,
     proxy_listen: Vec<SocketAddr>,
+    https_listen: Vec<SocketAddr>,
+    /// Present only when an HTTPS trust mode is configured.
+    #[cfg(feature = "https")]
+    certificates: Option<Arc<crate::tls::manager::CertManager>>,
     /// Present only when the configuration enables the proxy.
     #[cfg(feature = "proxy")]
     proxy: Option<Arc<crate::proxy::Proxy>>,
@@ -139,6 +164,9 @@ impl DnsServer {
         config.validate()?;
         let snapshot = DnsSnapshot::from_config(&config)?;
         let metrics = Arc::new(Metrics::default());
+        #[cfg(feature = "https")]
+        let certificates =
+            crate::tls::manager::CertManager::new(config_store.path().to_path_buf(), &config);
         Ok(Self {
             _daemon_lock: daemon_lock,
             started: Instant::now(),
@@ -152,6 +180,9 @@ impl DnsServer {
             tcp_connections: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
             tcp_clients: Mutex::new(HashMap::new()),
             proxy_listen: config.proxy_listen.clone(),
+            https_listen: https_listen(&config),
+            #[cfg(feature = "https")]
+            certificates,
             #[cfg(feature = "proxy")]
             proxy: (!config.proxy_listen.is_empty())
                 .then(|| Arc::new(crate::proxy::Proxy::new(&config))),
@@ -171,14 +202,22 @@ impl DnsServer {
         if config.listen != self.listen {
             bail!("listener changes require a service restart");
         }
-        if config.proxy_listen != self.proxy_listen {
+        if config.proxy_listen != self.proxy_listen || https_listen(config) != self.https_listen {
             bail!("proxy listener changes require a service restart");
+        }
+        #[cfg(feature = "https")]
+        if config.https.is_some() != self.certificates.is_some() {
+            bail!("enabling or disabling HTTPS requires a service restart");
         }
         let snapshot = DnsSnapshot::from_config(config)?;
         self.forwarder.reset(&config.upstreams);
         #[cfg(feature = "proxy")]
         if let Some(proxy) = &self.proxy {
             proxy.install(config);
+        }
+        #[cfg(feature = "https")]
+        if let Some(certificates) = &self.certificates {
+            certificates.install(config);
         }
         self.snapshot.store(Arc::new(snapshot));
         Ok(())
@@ -196,7 +235,22 @@ impl DnsServer {
             proxy: self.proxy.as_ref().map(|proxy| proxy.status()),
             #[cfg(not(feature = "proxy"))]
             proxy: None,
+            #[cfg(feature = "https")]
+            certificates: self.certificates.as_ref().map(|manager| manager.status()),
+            #[cfg(not(feature = "https"))]
+            certificates: None,
         }
+    }
+
+    /// Renew every HTTPS certificate now. Returns false without an HTTPS trust mode.
+    #[cfg_attr(not(feature = "https"), allow(clippy::unused_self))]
+    pub(crate) fn renew_certificates(&self) -> bool {
+        #[cfg(feature = "https")]
+        if let Some(certificates) = &self.certificates {
+            certificates.renew_now();
+            return true;
+        }
+        false
     }
 
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -204,6 +258,11 @@ impl DnsServer {
         for address in &self.proxy_listen {
             listeners
                 .proxy
+                .push((*address, TcpListener::bind(address).await?));
+        }
+        for address in &self.https_listen {
+            listeners
+                .https
                 .push((*address, TcpListener::bind(address).await?));
         }
         self.run_with(listeners, shutdown).await
@@ -222,7 +281,9 @@ impl DnsServer {
         listeners: Listeners,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<()> {
-        if listeners.addresses() != self.listen || listeners.proxy_addresses() != self.proxy_listen
+        if listeners.addresses() != self.listen
+            || listeners.proxy_addresses() != self.proxy_listen
+            || listeners.https_addresses() != self.https_listen
         {
             bail!("bound listeners do not match the configuration");
         }
@@ -252,6 +313,19 @@ impl DnsServer {
                     listener,
                     shutdown.clone(),
                 ));
+            }
+            #[cfg(feature = "https")]
+            if let Some(certificates) = &server.certificates {
+                tasks.spawn(Arc::clone(certificates).maintain(shutdown.clone()));
+                for (address, listener) in listeners.https {
+                    info!(%address, "HTTPS proxy ready");
+                    tasks.spawn(crate::proxy::serve_tls(
+                        Arc::clone(proxy),
+                        listener,
+                        Arc::clone(certificates),
+                        shutdown.clone(),
+                    ));
+                }
             }
         }
         tasks.spawn(run_reload(Arc::clone(&server), shutdown.clone()));

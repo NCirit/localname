@@ -12,12 +12,15 @@ use tokio::{
     time,
 };
 
+/// A loopback port free for both UDP and TCP, since DNS listens on both.
 fn unused_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 async fn start_server(mut config: Config) -> (tempfile::TempDir, SocketAddr, watch::Sender<bool>) {

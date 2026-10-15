@@ -10,6 +10,8 @@ pub mod privilege;
 #[cfg(feature = "proxy")]
 pub mod proxy;
 pub mod router;
+#[cfg(feature = "https")]
+pub mod tls;
 
 pub use config::{Config, ConfigStore, RecordConfig, ServiceConfig};
 pub use dns::{

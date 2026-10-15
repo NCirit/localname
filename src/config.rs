@@ -39,6 +39,9 @@ pub struct Config {
     /// Addresses of the optional HTTP/WebSocket service proxy. Empty means DNS-only mode:
     /// no proxy listener or proxy task exists.
     pub proxy_listen: Vec<SocketAddr>,
+    /// HTTPS for proxied services; absent means no TLS listener, keys, or certificates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub https: Option<HttpsConfig>,
     pub records: Vec<RecordConfig>,
     pub services: Vec<ServiceConfig>,
 }
@@ -59,6 +62,54 @@ pub struct ServiceConfig {
     pub target: SocketAddr,
     #[serde(default)]
     pub https: bool,
+}
+
+/// How service certificates are obtained (M4b). Both modes need an explicit user step:
+/// trusting the local CA, or delegating DNS-01 for a domain the user owns.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HttpsMode {
+    /// A CA created on this host, constrained to the zone, signs service certificates.
+    LocalCa,
+    /// An ACME CA issues certificates for an owned domain via DNS-01.
+    AcmeDns01,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HttpsConfig {
+    pub mode: HttpsMode,
+    pub listen: Vec<SocketAddr>,
+    /// Renew certificates this many days before they expire.
+    #[serde(default = "default_renew_before_days")]
+    pub renew_before_days: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_contact: Option<String>,
+    /// The user accepted the ACME CA's terms of service (`--agree-tos`).
+    #[serde(default)]
+    pub acme_terms_agreed: bool,
+    /// PEM roots for a private ACME server's HTTPS endpoint (such as step-ca).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_ca_bundle: Option<PathBuf>,
+    /// Program run as `HOOK set|clear NAME VALUE` to publish DNS-01 TXT records. Provider
+    /// credentials stay with the hook, never in this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns01_hook: Option<PathBuf>,
+    /// Seconds to wait after the hook publishes a record, for DNS propagation.
+    #[serde(default = "default_dns01_wait_seconds")]
+    pub dns01_wait_seconds: u64,
+}
+
+pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+
+const fn default_renew_before_days() -> u32 {
+    30
+}
+
+const fn default_dns01_wait_seconds() -> u64 {
+    30
 }
 
 const fn default_ttl() -> u32 {
@@ -86,6 +137,7 @@ impl Default for Config {
             rebind_allowed_domains: Vec::new(),
             firefox_doh_canary: true,
             proxy_listen: Vec::new(),
+            https: None,
             records: Vec::new(),
             services: Vec::new(),
         }
@@ -242,11 +294,71 @@ impl Config {
                     service.name
                 );
             }
-            if service.https {
+            if service.https && self.https.is_none() {
                 bail!(
-                    "HTTPS for service {} requires an HTTPS trust mode, which is not available in this release",
+                    "HTTPS for service {} requires an HTTPS trust mode; run `localname https plan`",
                     service.name
                 );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_https(&self, https: &HttpsConfig) -> Result<()> {
+        if !cfg!(feature = "https") {
+            bail!("HTTPS is unsupported: this build was compiled without the https feature");
+        }
+        if self.proxy_listen.is_empty() {
+            bail!("HTTPS requires the proxy; run `localname proxy enable` first");
+        }
+        if https.listen.is_empty() {
+            bail!("https.listen needs at least one address");
+        }
+        for listen in &https.listen {
+            if listen.port() == 0 || !is_private_address(listen.ip()) {
+                bail!("https.listen must select a private or loopback interface and nonzero port");
+            }
+            if self.proxy_listen.contains(listen) || self.listen.contains(listen) {
+                bail!("HTTPS listener {listen} is already used by the proxy or DNS");
+            }
+        }
+        if !(1..=60).contains(&https.renew_before_days) {
+            bail!("https.renew_before_days must be between 1 and 60");
+        }
+        match https.mode {
+            HttpsMode::LocalCa => {
+                if https.dns01_hook.is_some() || https.acme_directory.is_some() {
+                    bail!("ACME settings are only valid with mode = \"acme-dns01\"");
+                }
+            }
+            HttpsMode::AcmeDns01 => {
+                if is_private_zone(&self.zone) {
+                    bail!(
+                        "ACME certificates need a public domain you own; {} is private, so use mode = \"local-ca\" or a zone such as home.example.com",
+                        self.zone
+                    );
+                }
+                if !https.acme_terms_agreed {
+                    bail!(
+                        "mode acme-dns01 requires accepting the ACME CA's terms of service (--agree-tos)"
+                    );
+                }
+                let hook = https.dns01_hook.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "mode acme-dns01 requires dns01_hook, a program that publishes TXT records"
+                    )
+                })?;
+                if !hook.is_absolute() {
+                    bail!("dns01_hook must be an absolute path");
+                }
+                if let Some(directory) = &https.acme_directory
+                    && !directory.starts_with("https://")
+                {
+                    bail!("acme_directory must be an https:// URL");
+                }
+                if https.dns01_wait_seconds > 3_600 {
+                    bail!("dns01_wait_seconds must be at most 3600");
+                }
             }
         }
         Ok(())
@@ -263,6 +375,9 @@ impl Config {
         }
         if !self.services.is_empty() && self.proxy_listen.is_empty() {
             bail!("services require proxy_listen; enable the proxy with `localname proxy enable`");
+        }
+        if let Some(https) = &self.https {
+            self.validate_https(https)?;
         }
         let mut seen = HashSet::new();
         for listen in &self.proxy_listen {
@@ -286,6 +401,25 @@ impl Config {
     pub fn query_name(&self, name: &str) -> Result<String> {
         query_name(name, &self.zone)
     }
+}
+
+/// Zones no public CA can validate: special-use and common private suffixes.
+pub fn is_private_zone(zone: &str) -> bool {
+    [
+        "home.arpa.",
+        "local.",
+        "localhost.",
+        "internal.",
+        "lan.",
+        "home.",
+        "corp.",
+        "private.",
+        "test.",
+        "invalid.",
+        "example.",
+    ]
+    .iter()
+    .any(|suffix| name_in_zone(zone, suffix))
 }
 
 pub fn name_in_zone(name: &str, zone: &str) -> bool {

@@ -149,11 +149,7 @@ fn committed_change_with_failed_dns_readback_returns_rollback_data() {
         .join("agent's device settings")
         .join("config.toml");
     let store = ConfigStore::new(&path);
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = dual_port();
     store
         .initialize(&Config {
             listen: vec![format!("127.0.0.1:{port}").parse().unwrap()],
@@ -314,11 +310,7 @@ impl Drop for Daemon {
 fn live_daemon_mutations_are_verified_and_status_reports_counters() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = dual_port();
     let config = format!(
         "zone = \"home.arpa\"\nlisten = [\"127.0.0.1:{port}\"]\nupstreams = [\"127.0.0.1:9\"]\nallowed_clients = [\"127.0.0.0/8\"]\n"
     );
@@ -364,4 +356,16 @@ fn live_daemon_mutations_are_verified_and_status_reports_counters() {
         &["add", "late", "192.168.1.99", "--expect-revision", "3"],
     );
     assert_eq!(offline_writer.status.code(), Some(5));
+}
+
+/// A loopback port free for both UDP and TCP: DNS listens on both, and a port free for
+/// one transport can be taken for the other.
+fn dual_port() -> u16 {
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
