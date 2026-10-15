@@ -39,6 +39,15 @@ jobs:
       - run: docker compose -p localname-test -f tests/network/compose.yml up --build --abort-on-container-exit --exit-code-from client
       - if: always()
         run: docker compose -p localname-test -f tests/network/compose.yml down --volumes
+  whole-home-setup:
+    # A second device takes a DHCP lease from a router that applies only the plan's router
+    # action, then verifies UDP, TCP, and system-resolver resolution (M3a).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -p localname-setup -f tests/network/setup.yml up --build --abort-on-container-exit --exit-code-from client
+      - if: always()
+        run: docker compose -p localname-setup -f tests/network/setup.yml down --volumes
   benchmark:
     # Performance budgets (see README): local answers p99 <= 5 ms at a paced 10k queries/s
     # with 10k records, server RSS <= 64 MiB, release binary <= 10 MiB, zero errors.

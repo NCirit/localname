@@ -14,7 +14,7 @@ use tempfile::NamedTempFile;
 
 use crate::error::{ErrorCode, coded};
 
-pub const CURRENT_SCHEMA: u32 = 1;
+pub const CURRENT_SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -27,6 +27,15 @@ pub struct Config {
     pub allowed_clients: Vec<IpNet>,
     pub cache_entries: usize,
     pub upstream_timeout_ms: u64,
+    /// Remove private, loopback, and link-local addresses from forwarded public answers, so
+    /// a public name cannot be used to reach devices on the LAN (DNS rebinding).
+    pub rebind_protection: bool,
+    /// Domains whose forwarded answers may contain private addresses, such as the router's
+    /// own DHCP host domain.
+    pub rebind_allowed_domains: Vec<String>,
+    /// Answer Firefox's DNS-over-HTTPS canary domain with NXDOMAIN so it keeps using this
+    /// resolver.
+    pub firefox_doh_canary: bool,
     pub records: Vec<RecordConfig>,
     pub services: Vec<ServiceConfig>,
 }
@@ -68,6 +77,9 @@ impl Default for Config {
             ],
             cache_entries: 4096,
             upstream_timeout_ms: 2_000,
+            rebind_protection: true,
+            rebind_allowed_domains: Vec::new(),
+            firefox_doh_canary: true,
             records: Vec::new(),
             services: Vec::new(),
         }
@@ -129,6 +141,14 @@ impl Config {
         if !(100..=60_000).contains(&self.upstream_timeout_ms) {
             bail!("upstream_timeout_ms must be between 100 and 60000");
         }
+        let mut allowed = Vec::with_capacity(self.rebind_allowed_domains.len());
+        for domain in &self.rebind_allowed_domains {
+            let domain = canonical_zone(domain)?;
+            if !allowed.contains(&domain) {
+                allowed.push(domain);
+            }
+        }
+        self.rebind_allowed_domains = allowed;
 
         let mut by_name: HashMap<String, HashSet<&'static str>> = HashMap::new();
         let mut cname_counts = HashMap::new();
@@ -632,7 +652,14 @@ fn parse(text: &str) -> Result<Config> {
 /// `MIGRATIONS[n - 1]` upgrades schema `n` to `n + 1`. Steps are pure table rewrites so a
 /// migrated file is only persisted by the next ordinary, backed-up write.
 type Migration = fn(&mut toml::Table);
-const MIGRATIONS: [Migration; CURRENT_SCHEMA as usize - 1] = [];
+const MIGRATIONS: [Migration; CURRENT_SCHEMA as usize - 1] = [migrate_1_to_2];
+
+/// Schema 2 adds rebinding protection and the Firefox DNS-over-HTTPS canary, both enabled.
+fn migrate_1_to_2(table: &mut toml::Table) {
+    for key in ["rebind_protection", "firefox_doh_canary"] {
+        table.entry(key).or_insert(toml::Value::Boolean(true));
+    }
+}
 
 /// When running as root on Unix, give a newly created file to the owner of `directory`, so
 /// an administrator's offline edit never leaves files the service account cannot replace.
@@ -764,6 +791,44 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn schema_1_files_load_with_schema_2_defaults() {
+        let schema_1 = r#"
+schema = 1
+revision = 4
+zone = "home.arpa."
+listen = ["127.0.0.1:5354"]
+upstreams = ["1.1.1.1:53"]
+allowed_clients = ["127.0.0.0/8"]
+cache_entries = 4096
+upstream_timeout_ms = 2000
+services = []
+
+[[records]]
+name = "nas.home.arpa."
+value = "192.168.1.20"
+ttl = 60
+"#;
+        let mut config = parse(schema_1).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.schema, CURRENT_SCHEMA);
+        assert_eq!(config.revision, 4);
+        assert!(config.rebind_protection);
+        assert!(config.firefox_doh_canary);
+        assert!(config.rebind_allowed_domains.is_empty());
+        assert_eq!(config.records.len(), 1);
+    }
+
+    #[test]
+    fn rebind_allowed_domains_are_canonical_and_unique() {
+        let mut config = Config {
+            rebind_allowed_domains: vec!["LAN".into(), "lan.".into(), "fritz.box".into()],
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        assert_eq!(config.rebind_allowed_domains, ["lan.", "fritz.box."]);
     }
 
     #[test]

@@ -13,7 +13,12 @@ pub enum Special {
     /// resolvers (such as the router) but are answered locally when only public
     /// upstreams exist. The value is the zone apex.
     LocallyServed(String),
+    /// Firefox's canary domain: NXDOMAIN tells it not to enable DNS over HTTPS by
+    /// default, which would bypass this resolver and its local names.
+    DohCanary,
 }
+
+pub const DOH_CANARY: &str = "use-application-dns.net.";
 
 /// Classify a lowercase, fully qualified name.
 pub fn classify(name: &str) -> Option<Special> {
@@ -22,6 +27,9 @@ pub fn classify(name: &str) -> Option<Special> {
     }
     if name == "invalid." || name.ends_with(".invalid.") {
         return Some(Special::Invalid);
+    }
+    if name == DOH_CANARY {
+        return Some(Special::DohCanary);
     }
     for apex in ["home.arpa.", "local."] {
         if name == apex || name.ends_with(&format!(".{apex}")) {
@@ -154,6 +162,11 @@ mod tests {
         assert_eq!(classify("localhost."), Some(Special::Localhost));
         assert_eq!(classify("app.localhost."), Some(Special::Localhost));
         assert_eq!(classify("x.invalid."), Some(Special::Invalid));
+        assert_eq!(
+            classify("use-application-dns.net."),
+            Some(Special::DohCanary)
+        );
+        assert_eq!(classify("x.use-application-dns.net."), None);
         assert_eq!(
             classify("printer.local."),
             Some(Special::LocallyServed("local.".into()))

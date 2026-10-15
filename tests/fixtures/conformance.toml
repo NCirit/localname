@@ -147,3 +147,12 @@ type = "A"
 rcode = "ServFail"
 aa = false
 answers = []
+
+[[case]]
+about = "Firefox DoH canary is answered locally so automatic DoH stays off (decision 25)"
+name = "use-application-dns.net."
+type = "A"
+rcode = "NXDomain"
+aa = true
+answers = []
+soa_authority = true

@@ -25,7 +25,15 @@ localname status
 localname diagnose --output json
 ```
 
-For home-network setup, run `localname setup` to inspect the network and show the proposed server address. `localname setup --apply` writes the configuration. Start the server, reserve its address in your router, then set the router's LAN/DHCP DNS server to that address. Port 53 must be available and the host firewall must permit DNS over UDP and TCP from your LAN. The setup command currently provides guidance; it does not install a service or change your router.
+For home-network setup, run `localname setup`. It inspects this host — LAN address, port 53, IPv6, VPNs, firewall, and the current resolvers — and prints each check, the one router change to make, and how to verify it. When port 53 is taken it names the program holding it; when a firewall is active it prints the exact command that allows DNS from your LAN. `localname setup --apply` writes the configuration and adds `localname.home.arpa` for this host. Then:
+
+1. Start the server (`localname serve` or the service below).
+2. On the router's LAN/DHCP page, set the DNS server handed to devices to the address setup shows, and leave the secondary DNS server empty. Setup lists the exact steps, including reserving the address and the IPv6 DNS setting when your network needs them.
+3. Reconnect a second device and run `localname setup verify` on it. It finds localname through that device's DNS settings and checks UDP, TCP, and the system resolver. Without localname on that device, `nslookup localname.home.arpa` must return the server's address.
+
+`localname setup rollback` restores what existed before `--apply` and tells you how to set the router back. Setup never changes the router itself. In a container, pass `--listen` with the container address and `--advertise` with the host's LAN address; `--upstream` selects resolvers when the detected ones are unsuitable.
+
+Answers forwarded from the Internet that point a public name at a private, loopback, or link-local address are dropped (DNS rebinding protection). Setup exempts the router's own domain, such as `lan`; list others in `rebind_allowed_domains`. localname also answers Firefox's DNS-over-HTTPS canary domain so Firefox keeps using network DNS and local names; set `firefox_doh_canary = false` to turn that off.
 
 On Linux with systemd, install the hardened service unit from `packaging/systemd`. It runs as a dedicated `localname` account that keeps only the capability to bind port 53, and stores configuration and revisions in `/var/lib/localname`:
 
@@ -86,7 +94,11 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 cargo build --release && cargo run --release --example benchmark
+docker compose -f tests/network/compose.yml up --build --abort-on-container-exit --exit-code-from client
+docker compose -f tests/network/setup.yml up --build --abort-on-container-exit --exit-code-from client
 ```
+
+`tests/network/setup.yml` runs whole-home setup on an isolated network: a dnsmasq router applies only the plan's router action, and a second device takes a DHCP lease and runs `localname setup verify`.
 
 The benchmark starts the release binary as a separate server with 10,000 records and sends 20,000 UDP queries paced at 10,000 queries/second. Set `LOCALNAME_BENCH_RATE=0` for a throughput run. CI enforces these budgets on x86-64 and ARM64: p99 at most 5 ms, server memory at most 64 MiB, release binary at most 10 MiB. Results describe the machine where the test runs; they are not a guarantee for every router or host.
 

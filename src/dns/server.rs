@@ -26,7 +26,7 @@ use super::{
     forward::{Forwarder, Upstreams},
     local_response, localhost_response, nonexistent_response,
     special::{self, Special},
-    truncate_response,
+    strip_private_answers, truncate_response,
 };
 use crate::config::{Config, ConfigStore};
 
@@ -78,8 +78,16 @@ pub struct DnsServer {
 
 enum Outcome {
     Answer(Vec<u8>),
-    Forward(Message, Vec<SocketAddr>),
+    Forward(Forward),
     Drop,
+}
+
+/// A question to send upstream, the servers that may receive it, and whether private
+/// addresses must be removed from the answer.
+struct Forward {
+    message: Message,
+    upstreams: Vec<SocketAddr>,
+    rebind_protected: bool,
 }
 
 /// Largest UDP response the client accepts (RFC 6891 §6.2.5; 512 without EDNS).
@@ -237,6 +245,7 @@ impl DnsServer {
                 limit,
             );
         }
+        let mut rebind_protected = snapshot.rebind_protected(&name);
         let upstreams = match special::classify(&name) {
             Some(Special::Localhost) => {
                 Metrics::add(&self.metrics.local);
@@ -253,7 +262,17 @@ impl DnsServer {
                     limit,
                 );
             }
+            Some(Special::DohCanary) if snapshot.firefox_doh_canary => {
+                Metrics::add(&self.metrics.local);
+                return (
+                    nonexistent_response(&message, special::DOH_CANARY)
+                        .map_or(Outcome::Drop, Outcome::Answer),
+                    limit,
+                );
+            }
             Some(Special::LocallyServed(apex)) => {
+                // Locally served zones legitimately hold private addresses.
+                rebind_protected = false;
                 let private = snapshot.private_upstreams();
                 if private.is_empty() {
                     Metrics::add(&self.metrics.local);
@@ -265,7 +284,7 @@ impl DnsServer {
                 }
                 private
             }
-            None => snapshot.upstreams.clone(),
+            Some(Special::DohCanary) | None => snapshot.upstreams.clone(),
         };
         if !message.recursion_desired {
             return answer(ResponseCode::Refused);
@@ -278,23 +297,39 @@ impl DnsServer {
             warn!(%peer, "forwarding loop detected: an upstream forwards this question back");
             return answer(ResponseCode::ServFail);
         }
-        (Outcome::Forward(message, upstreams), limit)
+        (
+            Outcome::Forward(Forward {
+                message,
+                upstreams,
+                rebind_protected,
+            }),
+            limit,
+        )
     }
 
-    async fn forward(
-        &self,
-        request: &[u8],
-        message: &Message,
-        upstreams: &[SocketAddr],
-    ) -> Vec<u8> {
+    async fn forward(&self, request: &[u8], forward: &Forward) -> Vec<u8> {
         Metrics::add(&self.metrics.forwarded);
         let snapshot = self.snapshot.load();
         let settings = Upstreams {
-            servers: upstreams,
+            servers: &forward.upstreams,
             timeout: snapshot.upstream_timeout,
             cache_entries: snapshot.cache_entries,
         };
+        let message = &forward.message;
         match self.forwarder.resolve(request, message, &settings).await {
+            Ok(response) if forward.rebind_protected => match strip_private_answers(&response) {
+                Ok(None) => response,
+                Ok(Some(stripped)) => {
+                    Metrics::add(&self.metrics.rebind_blocked);
+                    debug!("removed private addresses from a forwarded answer");
+                    stripped
+                }
+                Err(error) => {
+                    Metrics::add(&self.metrics.errors);
+                    debug!(%error, "invalid upstream answer");
+                    encode_error(message, ResponseCode::ServFail).unwrap_or_default()
+                }
+            },
             Ok(response) => response,
             Err(error) => {
                 Metrics::add(&self.metrics.errors);
@@ -312,9 +347,9 @@ impl DnsServer {
     ) -> Option<(Vec<u8>, usize)> {
         match self.decide(request, peer) {
             (Outcome::Answer(bytes), limit) => Some((bytes, limit)),
-            (Outcome::Forward(message, upstreams), limit) => {
+            (Outcome::Forward(forward), limit) => {
                 let _permit = Arc::clone(&self.forwards).try_acquire_owned().ok()?;
-                Some((self.forward(request, &message, &upstreams).await, limit))
+                Some((self.forward(request, &forward).await, limit))
             }
             (Outcome::Drop, _) => None,
         }
@@ -381,7 +416,7 @@ async fn run_udp(
                     debug!(%error, %peer, "failed to send UDP response");
                 }
             }
-            (Outcome::Forward(message, upstreams), limit) => {
+            (Outcome::Forward(forward), limit) => {
                 let Ok(permit) = Arc::clone(&server.forwards).try_acquire_owned() else {
                     Metrics::add(&server.metrics.dropped);
                     continue;
@@ -391,7 +426,7 @@ async fn run_udp(
                 let socket = Arc::clone(&socket);
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let response = server.forward(&request, &message, &upstreams).await;
+                    let response = server.forward(&request, &forward).await;
                     if let Err(error) = socket.send_to(&fit_udp(response, limit), peer).await {
                         debug!(%error, %peer, "failed to send UDP response");
                     }
@@ -623,11 +658,48 @@ mod tests {
         let (_dir, server) = server_with(config);
         let message = query("9.9.168.192.in-addr.arpa.", RecordType::PTR);
         match server.decide(&message.to_vec().unwrap(), peer()).0 {
-            Outcome::Forward(_, upstreams) => {
-                assert_eq!(upstreams, vec!["192.168.1.1:53".parse().unwrap()]);
+            Outcome::Forward(forward) => {
+                assert_eq!(forward.upstreams, vec!["192.168.1.1:53".parse().unwrap()]);
+                assert!(!forward.rebind_protected);
             }
             _ => panic!("expected forward to the private upstream"),
         }
+    }
+
+    fn forwarded(server: &DnsServer, name: &str) -> Forward {
+        match server
+            .decide(&query(name, RecordType::A).to_vec().unwrap(), peer())
+            .0
+        {
+            Outcome::Forward(forward) => forward,
+            _ => panic!("expected {name} to be forwarded"),
+        }
+    }
+
+    #[test]
+    fn public_names_are_rebind_protected_except_allowed_domains() {
+        let mut config = Config {
+            rebind_allowed_domains: vec!["lan".into()],
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let (_dir, server) = server_with(config);
+        assert!(forwarded(&server, "example.com.").rebind_protected);
+        assert!(!forwarded(&server, "printer.lan.").rebind_protected);
+    }
+
+    #[test]
+    fn doh_canary_is_answered_locally_unless_disabled() {
+        let (_dir, server) = test_server();
+        let response = answer(&server, &query(special::DOH_CANARY, RecordType::A)).unwrap();
+        assert_eq!(response.response_code, ResponseCode::NXDomain);
+        let mut config = Config {
+            firefox_doh_canary: false,
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let (_dir, server) = server_with(config);
+        assert!(forwarded(&server, special::DOH_CANARY).rebind_protected);
     }
 
     #[test]

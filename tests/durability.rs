@@ -130,7 +130,7 @@ fn killed_writers_leave_a_valid_revision() {
 fn newer_schemas_are_refused_without_modification() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let text = "schema = 2\nzone = \"home.arpa\"\nfuture_setting = true\n";
+    let text = "schema = 999\nzone = \"home.arpa\"\nfuture_setting = true\n";
     std::fs::write(&path, text).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_localname"))
         .arg("--config")

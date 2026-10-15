@@ -1,0 +1,81 @@
+# Whole-home setup on an isolated LAN (M3a): localname detects its own network and
+# writes a plan; the "router" applies exactly the plan's one router action (its DHCP DNS
+# server); a second device takes a DHCP lease and verifies with `localname setup verify`.
+services:
+  server:
+    build:
+      context: ../..
+      target: network-tools
+    entrypoint: ["/bin/sh", "/scenario/server.sh"]
+    volumes:
+      - ./setup:/scenario:ro
+      - plan:/plan
+      - state:/var/lib/localname
+    # Containers allow unprivileged binds to port 53 only with this sysctl.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "53"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "test", "-s", "/plan/dns_server"]
+      interval: 1s
+      retries: 60
+    networks:
+      lan:
+        ipv4_address: 10.55.0.20
+  upstream:
+    build:
+      context: ../..
+      target: network-test
+    command: ["--config", "/etc/localname/config.toml", "serve"]
+    volumes:
+      - ./setup/upstream.toml:/etc/localname/config.toml:ro
+    read_only: true
+    tmpfs:
+      - /etc/localname:uid=10001,gid=10001
+    networks:
+      lan:
+        ipv4_address: 10.55.0.3
+  router:
+    build:
+      context: ../..
+      target: network-tools
+    user: "0"
+    entrypoint: ["/bin/sh", "/scenario/router.sh"]
+    volumes:
+      - ./setup:/scenario:ro
+      - plan:/plan:ro
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE, SETUID, SETGID]
+    depends_on:
+      server: {condition: service_healthy}
+    networks:
+      lan:
+        ipv4_address: 10.55.0.30
+  client:
+    build:
+      context: ../..
+      target: network-tools
+    user: "0"
+    entrypoint: ["/bin/sh", "/scenario/client.sh"]
+    volumes:
+      - ./setup:/scenario:ro
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW]
+    depends_on:
+      router: {condition: service_started}
+      upstream: {condition: service_started}
+    networks:
+      lan:
+        ipv4_address: 10.55.0.40
+networks:
+  lan:
+    # Not internal: Docker's isolation rules for internal networks drop DHCP's
+    # 0.0.0.0 -> 255.255.255.255 broadcasts. Every resolver in the scenario is explicit.
+    ipam:
+      config:
+        - subnet: 10.55.0.0/24
+          gateway: 10.55.0.254
+volumes:
+  plan:
+  state:

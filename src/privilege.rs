@@ -18,7 +18,7 @@ pub fn is_root() -> bool {
 /// regained afterwards, the process refuses to continue.
 #[cfg(unix)]
 pub fn drop_to(user: &str) -> Result<()> {
-    use nix::unistd::{Uid, User, geteuid, setgid, setuid};
+    use nix::unistd::{User, geteuid};
 
     let entry = User::from_name(user)?.ok_or_else(|| {
         coded(
@@ -35,10 +35,15 @@ pub fn drop_to(user: &str) -> Result<()> {
             format!("permission required: switching to {user} requires starting as root"),
         ));
     }
-    #[cfg(not(target_vendor = "apple"))]
-    nix::unistd::setgroups(&[entry.gid])?;
-    #[cfg(target_vendor = "apple")]
-    nix::unistd::initgroups(&std::ffi::CString::new(user)?, entry.gid)?;
+    switch_to(&entry)
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn switch_to(entry: &nix::unistd::User) -> Result<()> {
+    use nix::unistd::{Uid, geteuid, setgid, setgroups, setuid};
+
+    // Replace supplementary groups first, or root's groups would stay attached.
+    setgroups(&[entry.gid])?;
     setgid(entry.gid)?;
     setuid(entry.uid)?;
     if setuid(Uid::from_raw(0)).is_ok() || geteuid().is_root() {
@@ -48,6 +53,16 @@ pub fn drop_to(user: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// nix offers no safe way to replace supplementary groups on Apple platforms, and
+/// switching without that would keep root's groups, so this fails closed.
+#[cfg(target_vendor = "apple")]
+fn switch_to(_entry: &nix::unistd::User) -> Result<()> {
+    Err(coded(
+        ErrorCode::InvalidInput,
+        "invalid option: --user is not supported on macOS; run the launchd job under a dedicated account with its UserName key instead",
+    ))
 }
 
 #[cfg(not(unix))]

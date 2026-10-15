@@ -1,6 +1,7 @@
 mod health;
 mod records;
 mod setup;
+mod verify;
 
 use std::{
     env,
@@ -132,6 +133,21 @@ pub(crate) struct VerificationError {
     pub message: String,
 }
 
+/// A failed command whose output still carries its data, such as a blocked setup plan or
+/// a failed end-to-end check, so agents can act on the details.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct ReportedError {
+    pub command: &'static str,
+    pub code: ErrorCode,
+    pub data: Value,
+    pub verification: Option<Value>,
+    pub next_actions: Vec<String>,
+    pub message: String,
+    /// Printed before the error line in human output.
+    pub human: String,
+}
+
 /// Parse arguments, run the command, and render errors in the selected format.
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -167,8 +183,11 @@ async fn run(cli: Cli) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let verification = error.downcast_ref::<VerificationError>();
+            let reported = error.downcast_ref::<ReportedError>();
             let code = if verification.is_some() {
                 ErrorCode::VerificationFailed
+            } else if let Some(reported) = reported {
+                reported.code
             } else {
                 classify(&error)
             };
@@ -185,6 +204,12 @@ async fn run(cli: Cli) -> ExitCode {
                     envelope.rollback =
                         Some(rollback_command(&path, verification.previous_revision));
                 }
+                if let Some(reported) = reported {
+                    envelope.command = reported.command;
+                    envelope.data = reported.data.clone();
+                    envelope.verification.clone_from(&reported.verification);
+                    envelope.next_actions.clone_from(&reported.next_actions);
+                }
                 envelope.error = Some(ErrorBody {
                     code: code.as_str(),
                     message: format!("{error:#}"),
@@ -193,6 +218,11 @@ async fn run(cli: Cli) -> ExitCode {
                     println!("{text}");
                 }
             } else {
+                if let Some(reported) = reported
+                    && !reported.human.is_empty()
+                {
+                    println!("{}", reported.human);
+                }
                 eprintln!("localname: {error:#}");
             }
             ExitCode::from(code.exit_code())
@@ -252,7 +282,7 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
                 || SKILL.into(),
             )
         }
-        Command::Setup(args) => setup::setup(output, &store, &args),
+        Command::Setup(args) => setup::setup(output, &store, &args).await,
         Command::Serve(args) => serve(store, args).await,
         Command::Status { check } => health::status(output, &store, check).await,
         Command::Diagnose => health::diagnose(output, &store).await,

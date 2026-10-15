@@ -90,6 +90,9 @@ pub struct DnsSnapshot {
     upstreams: Vec<SocketAddr>,
     upstream_timeout: Duration,
     cache_entries: usize,
+    rebind_protection: bool,
+    rebind_allowed_domains: Vec<String>,
+    firefox_doh_canary: bool,
 }
 
 impl DnsSnapshot {
@@ -125,6 +128,9 @@ impl DnsSnapshot {
             upstreams: config.upstreams.clone(),
             upstream_timeout: Duration::from_millis(config.upstream_timeout_ms),
             cache_entries: config.cache_entries,
+            rebind_protection: config.rebind_protection,
+            rebind_allowed_domains: config.rebind_allowed_domains.clone(),
+            firefox_doh_canary: config.firefox_doh_canary,
         })
     }
 
@@ -141,6 +147,15 @@ impl DnsSnapshot {
         self.allowed_clients
             .iter()
             .any(|network| network.contains(&address))
+    }
+
+    /// Whether private addresses must be removed from forwarded answers for `name`.
+    fn rebind_protected(&self, name: &str) -> bool {
+        self.rebind_protection
+            && !self
+                .rebind_allowed_domains
+                .iter()
+                .any(|domain| name_in_zone(name, domain))
     }
 
     /// Upstreams on this host or LAN, which may receive locally served zones.
@@ -222,6 +237,28 @@ pub(crate) fn reverse_name(address: IpAddr) -> String {
     }
 }
 
+/// Addresses a public name must not resolve to: reaching them lets a web page attack
+/// devices on the LAN or this host (DNS rebinding).
+fn is_rebinding_target(address: IpAddr) -> bool {
+    let address = canonical_ip(address);
+    is_private_address(address) || address.is_unspecified()
+}
+
+/// Remove rebinding targets from a forwarded answer. Returns `None` when nothing changed.
+fn strip_private_answers(bytes: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut message = Message::from_vec(bytes)?;
+    let before = message.answers.len();
+    message.answers.retain(|record| match &record.data {
+        RData::A(A(address)) => !is_rebinding_target(IpAddr::V4(*address)),
+        RData::AAAA(AAAA(address)) => !is_rebinding_target(IpAddr::V6(*address)),
+        _ => true,
+    });
+    if message.answers.len() == before {
+        return Ok(None);
+    }
+    Ok(Some(message.to_vec()?))
+}
+
 /// Aggregate health counters. Decision 11: no per-query history is retained.
 #[derive(Default)]
 pub(crate) struct Metrics {
@@ -233,6 +270,7 @@ pub(crate) struct Metrics {
     errors: AtomicU64,
     dropped: AtomicU64,
     loops: AtomicU64,
+    rebind_blocked: AtomicU64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -247,6 +285,9 @@ pub struct MetricsSnapshot {
     pub dropped: u64,
     #[serde(default)]
     pub loops: u64,
+    /// Forwarded answers from which private addresses were removed.
+    #[serde(default)]
+    pub rebind_blocked: u64,
 }
 
 impl Metrics {
@@ -269,6 +310,7 @@ impl Metrics {
             errors: load(&self.errors),
             dropped: load(&self.dropped),
             loops: load(&self.loops),
+            rebind_blocked: load(&self.rebind_blocked),
         }
     }
 }
@@ -475,6 +517,56 @@ mod tests {
         let name = reverse_name("2001:db8::1".parse().unwrap());
         assert!(name.ends_with(".ip6.arpa."));
         assert_eq!(name.matches('.').count(), 34);
+    }
+
+    #[test]
+    fn rebinding_targets_are_removed_from_forwarded_answers() {
+        let mut response = Message::response(7, hickory_proto::op::OpCode::Query);
+        let owner = Name::from_str("evil.example.").unwrap();
+        response.add_query(Query::query(owner.clone(), RecordType::A));
+        for address in ["192.168.1.1", "93.184.216.34", "127.0.0.1", "0.0.0.0"] {
+            response.add_answer(Record::from_rdata(
+                owner.clone(),
+                60,
+                RData::A(A(address.parse().unwrap())),
+            ));
+        }
+        response.add_answer(Record::from_rdata(
+            owner.clone(),
+            60,
+            RData::AAAA(AAAA("::ffff:10.0.0.1".parse().unwrap())),
+        ));
+        let stripped = strip_private_answers(&response.to_vec().unwrap())
+            .unwrap()
+            .unwrap();
+        let stripped = Message::from_vec(&stripped).unwrap();
+        assert_eq!(stripped.answers.len(), 1);
+        assert_eq!(
+            stripped.answers[0].data,
+            RData::A(A("93.184.216.34".parse().unwrap()))
+        );
+        let public = Message::from_vec(&stripped.to_vec().unwrap()).unwrap();
+        assert!(
+            strip_private_answers(&public.to_vec().unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rebinding_allowlist_uses_label_boundaries() {
+        let mut config = config_with_record();
+        config.rebind_allowed_domains = vec!["lan".into()];
+        config.validate().unwrap();
+        let snapshot = DnsSnapshot::from_config(&config).unwrap();
+        assert!(!snapshot.rebind_protected("printer.lan."));
+        assert!(snapshot.rebind_protected("printer.evillan."));
+        config.rebind_protection = false;
+        assert!(
+            !DnsSnapshot::from_config(&config)
+                .unwrap()
+                .rebind_protected("x.example.")
+        );
     }
 
     #[test]

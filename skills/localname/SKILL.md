@@ -25,10 +25,14 @@ Short names expand beneath the configured zone (`home.arpa` by default); read th
 
 ## Setup and diagnosis
 
-- `localname setup` inspects the network and displays guidance. `setup --apply` writes localname configuration; it does not install a system service or change router settings.
+- `localname setup --output json` only inspects. `data.checks` lists each finding with `status` (`pass`, `info`, `warn`, `fail`) and a `remedy`; `data.router_action` is the single router change, as exact `steps` plus a `restore` instruction; `data.verification` says how to confirm it. A `fail` check blocks `--apply` (exit 5 for port conflicts, 3 otherwise) and its remedy appears in `next_actions`.
+- `localname setup --apply` writes localname configuration and records the prior state; `localname setup rollback --dry-run` then `setup rollback` restores it (it refuses with CONFLICT once later revisions exist). For an existing configuration, stop the service and pass `--expect-revision`. Setup never installs a service or changes the router.
+- Show `router_action.steps` to the user verbatim. The user makes router changes; never claim one was made.
+- Verify from a second device with `localname setup verify --output json`. It finds localname through that device's own DNS settings, which proves the router change took effect, and requires UDP, TCP, and system-resolver success; exit 7 / `VERIFICATION_FAILED` carries per-check remedies. On the server itself the scope is `this_host`, which proves only local operation.
 - For an unprivileged local trial, use `localname setup --local --apply`, then `localname serve`. This listens on loopback port 5354 and does not provide whole-network naming.
 - For failures, run `localname diagnose --output json` before changing configuration. Distinguish configuration validity, listener health, LAN reachability, and client resolver selection.
 - A loopback answer proves only local operation. Verify from a second device before claiming a home network is integrated.
-- Router DNS, DHCP authority, OS resolver, firewall, and trust-store changes need the user's authorization for the exact affected targets. The CLI's current guidance does not authorize unrelated changes.
+- Router DNS, DHCP authority, OS resolver, firewall, and trust-store changes need the user's authorization for the exact affected targets. Setup's guidance does not authorize unrelated changes.
+- Public answers pointing at private addresses are filtered (rebinding protection); a router domain that legitimately does this belongs in `rebind_allowed_domains`, which setup fills from the network's search domains.
 - Keep `.local` for multicast DNS and use `home.arpa` for ordinary LAN records. Preserve VPN and enterprise resolver settings unless the user explicitly includes them.
 - Proxy routing and trusted HTTPS are not available in this release. Do not invent service or certificate commands.

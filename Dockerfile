@@ -24,3 +24,12 @@ CMD ["serve"]
 
 FROM runtime AS network-test
 COPY --from=build /build/network-probe /usr/local/bin/network-probe
+
+# DHCP server and client for the whole-home setup scenario (tests/network/setup.yml).
+FROM network-test AS network-tools
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends dnsmasq-base busybox \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir /plan && chown localname /plan
+USER localname

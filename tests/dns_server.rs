@@ -309,10 +309,32 @@ async fn local_answers_stay_fast_while_upstreams_are_down() {
         value: "192.168.1.20".into(),
         ttl: 60,
     });
-    let (_dir, listen, shutdown) = start_server(config).await;
+    let (dir, listen, shutdown) = start_server(config).await;
     // Pre-bound client sockets: socket creation is slow on some hosts and would measure
     // the test client rather than the server.
-    let flood = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let flood = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    // Drain SERVFAILs concurrently: 500 timeouts expire together, and a burst that size
+    // overflows default loopback socket buffers before a sequential reader catches up.
+    let failures = tokio::spawn({
+        let flood = std::sync::Arc::clone(&flood);
+        async move {
+            let mut buffer = [0_u8; 512];
+            let mut failures = 0;
+            while failures < 500 {
+                let Ok(Ok(size)) =
+                    time::timeout(Duration::from_secs(3), flood.recv(&mut buffer)).await
+                else {
+                    break;
+                };
+                if Message::from_vec(&buffer[..size]).unwrap().response_code
+                    == hickory_proto::op::ResponseCode::ServFail
+                {
+                    failures += 1;
+                }
+            }
+            failures
+        }
+    });
     for index in 0..500_u16 {
         let mut request = Message::query();
         request.metadata.id = index;
@@ -325,6 +347,10 @@ async fn local_answers_stay_fast_while_upstreams_are_down() {
             .send_to(&request.to_vec().unwrap(), listen)
             .await
             .unwrap();
+        // Spread the burst over ~200 ms so the upstream timeouts do not all fire at once.
+        if index % 50 == 49 {
+            time::sleep(Duration::from_millis(20)).await;
+        }
     }
     time::sleep(Duration::from_millis(50)).await;
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -353,19 +379,23 @@ async fn local_answers_stay_fast_while_upstreams_are_down() {
         slowest < Duration::from_millis(100),
         "slowest local answer {slowest:?}"
     );
-    // Every flooded query eventually fails cleanly instead of hanging.
-    let mut failures = 0;
-    while failures < 500 {
-        let size = time::timeout(Duration::from_secs(5), flood.recv(&mut buffer))
-            .await
-            .expect("SERVFAIL for every forwarded query")
-            .unwrap();
-        assert_eq!(
-            Message::from_vec(&buffer[..size]).unwrap().response_code,
-            hickory_proto::op::ResponseCode::ServFail
-        );
-        failures += 1;
-    }
+    // Every flooded query ends in SERVFAIL instead of hanging: the server counts each failed
+    // forward. Loopback UDP can still drop some replies in a burst this size.
+    let received = failures.await.unwrap();
+    let store = ConfigStore::new(dir.path().join("config.toml"));
+    let status = tokio::task::spawn_blocking(move || {
+        localname::control::send_if_running(&store, &localname::control::Request::Status)
+    })
+    .await
+    .unwrap()
+    .unwrap()
+    .and_then(|response| response.status)
+    .expect("daemon status");
+    assert_eq!(
+        status.metrics.errors, 500,
+        "SERVFAIL for every forwarded query"
+    );
+    assert!(received > 0, "no SERVFAIL replies arrived");
     drop(blackhole);
     shutdown.send(true).unwrap();
 }

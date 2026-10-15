@@ -134,7 +134,7 @@ pub async fn status(output: OutputFormat, store: &ConfigStore, check: bool) -> R
     }
     let human = match &daemon {
         Some(daemon) => format!(
-            "{detail}\nrevision {} · {} queries ({} local, {} forwarded, {} cached, {} refused, {} errors) · up {}s",
+            "{detail}\nrevision {} · {} queries ({} local, {} forwarded, {} cached, {} refused, {} errors, {} rebinding answers filtered) · up {}s",
             daemon.revision,
             daemon.metrics.queries,
             daemon.metrics.local,
@@ -142,6 +142,7 @@ pub async fn status(output: OutputFormat, store: &ConfigStore, check: bool) -> R
             daemon.metrics.cache_hits,
             daemon.metrics.refused,
             daemon.metrics.errors,
+            daemon.metrics.rebind_blocked,
             daemon.uptime_seconds
         ),
         None => detail.clone(),
