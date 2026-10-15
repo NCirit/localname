@@ -1,3 +1,4 @@
+mod client;
 mod health;
 mod records;
 mod setup;
@@ -75,6 +76,11 @@ enum Command {
     Revisions,
     /// Restore a previous configuration revision as a new revision.
     Rollback(records::RollbackArgs),
+    /// Point this device at localname when the router cannot advertise it.
+    Client {
+        #[command(subcommand)]
+        command: client::ClientCommand,
+    },
     /// Validate configuration.
     Config {
         #[command(subcommand)]
@@ -143,6 +149,7 @@ pub(crate) struct ReportedError {
     pub data: Value,
     pub verification: Option<Value>,
     pub next_actions: Vec<String>,
+    pub rollback: Option<String>,
     pub message: String,
     /// Printed before the error line in human output.
     pub human: String,
@@ -209,6 +216,8 @@ async fn run(cli: Cli) -> ExitCode {
                     envelope.data = reported.data.clone();
                     envelope.verification.clone_from(&reported.verification);
                     envelope.next_actions.clone_from(&reported.next_actions);
+                    envelope.rollback.clone_from(&reported.rollback);
+                    envelope.changed = reported.rollback.is_some();
                 }
                 envelope.error = Some(ErrorBody {
                     code: code.as_str(),
@@ -292,6 +301,7 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
         Command::List => records::list(output, &store),
         Command::Revisions => records::revisions(output, &store),
         Command::Rollback(args) => records::rollback(output, &store, &args).await,
+        Command::Client { command } => client::run(output, &command).await,
         Command::Config { command } => config_command(output, &store, command),
     }
 }

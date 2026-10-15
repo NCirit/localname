@@ -48,6 +48,25 @@ jobs:
       - run: docker compose -p localname-setup -f tests/network/setup.yml up --build --abort-on-container-exit --exit-code-from client
       - if: always()
         run: docker compose -p localname-setup -f tests/network/setup.yml down --volumes
+  client-linux:
+    # systemd-resolved split DNS with a VPN-like link: apply, reboot, roll back, reboot (M3b).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/client/linux/run.sh
+  client-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tests/client/macos.sh
+  client-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tests/client/windows.ps1
+        shell: pwsh
   benchmark:
     # Performance budgets (see README): local answers p99 <= 5 ms at a paced 10k queries/s
     # with 10k records, server RSS <= 64 MiB, release binary <= 10 MiB, zero errors.

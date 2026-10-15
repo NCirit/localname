@@ -81,31 +81,44 @@ pub fn send_if_running(store: &ConfigStore, request: &Request) -> Result<Option<
     send_frame(&mut stream, request).map(Some)
 }
 
-/// A missing endpoint means no daemon only when the daemon lock is also free; otherwise a
-/// daemon is starting or stopping and the caller must not fall back to offline writes.
-fn daemon_absent(store: &ConfigStore, error: &std::io::Error) -> Result<()> {
+/// Whether no daemon holds this configuration's lock.
+fn daemon_lock_free(store: &ConfigStore) -> Result<bool> {
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(store.path().with_extension("daemon.lock"))?;
-    if fs2::FileExt::try_lock_shared(&lock).is_ok() {
-        return Ok(());
+    Ok(fs2::FileExt::try_lock_shared(&lock).is_ok())
+}
+
+/// A missing endpoint means no daemon only when the daemon lock is also free. A daemon
+/// that holds the lock is starting (it serves DNS before its control endpoint) or
+/// stopping: wait briefly, and never fall back to offline writes.
+#[cfg(unix)]
+fn wait_for_endpoint(store: &ConfigStore, ready: impl Fn() -> bool) -> Result<bool> {
+    for _ in 0..60 {
+        if ready() {
+            return Ok(true);
+        }
+        if daemon_lock_free(store)? {
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     Err(coded(
         ErrorCode::Unavailable,
-        format!("DNS service unavailable: daemon control endpoint is not ready ({error})"),
+        "DNS service unavailable: the daemon holds this configuration but its control endpoint is not ready",
     ))
 }
 
 #[cfg(unix)]
 fn connect(store: &ConfigStore) -> Result<Option<std::os::unix::net::UnixStream>> {
     let path = socket_path(store.path());
-    if !path.exists() {
+    if !path.exists() && !wait_for_endpoint(store, || path.exists())? {
         return Ok(None);
     }
-    match std::os::unix::net::UnixStream::connect(path) {
+    match std::os::unix::net::UnixStream::connect(&path) {
         Ok(socket) => {
             socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
             socket.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
@@ -117,7 +130,17 @@ fn connect(store: &ConfigStore) -> Result<Option<std::os::unix::net::UnixStream>
                 std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
             ) =>
         {
-            daemon_absent(store, &error).map(|()| None)
+            // A stale socket from a crashed daemon, or one shutting down.
+            if daemon_lock_free(store)? {
+                Ok(None)
+            } else {
+                Err(coded(
+                    ErrorCode::Unavailable,
+                    format!(
+                        "DNS service unavailable: daemon control endpoint is not ready ({error})"
+                    ),
+                ))
+            }
         }
         Err(error) => Err(error.into()),
     }
@@ -138,7 +161,11 @@ fn connect(store: &ConfigStore) -> Result<Option<std::fs::File>> {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return daemon_absent(store, &error).map(|()| None);
+                if daemon_lock_free(store)? {
+                    return Ok(None);
+                }
+                // The daemon is starting; its pipe appears shortly.
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(error) => return Err(error.into()),
         }

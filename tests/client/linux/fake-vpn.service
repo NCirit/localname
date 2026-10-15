@@ -1,0 +1,14 @@
+# Test fixture: a VPN-like link whose client sets its own DNS server, routing domain, and
+# search domain through systemd-resolved at every boot, as VPN clients do.
+[Unit]
+Description=Fake VPN link with its own DNS
+After=systemd-resolved.service
+Requires=systemd-resolved.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'ip link add vpn0 type dummy 2>/dev/null || true; ip addr replace 10.8.0.2/24 dev vpn0; ip link set vpn0 up; resolvectl dns vpn0 10.8.0.1; resolvectl domain vpn0 corp.example ~vpn.corp.example'
+
+[Install]
+WantedBy=multi-user.target

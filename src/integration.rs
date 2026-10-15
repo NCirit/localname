@@ -85,12 +85,12 @@ pub fn inspect_network() -> NetworkFacts {
         .iter()
         .filter(|i| on_lan(i))
         .any(|interface| matches!(interface.ip(), IpAddr::V6(ip) if is_global_v6(ip)));
-    let mut vpn_interfaces: Vec<String> = interfaces
+    let vpn_interfaces: Vec<String> = interfaces
         .iter()
         .filter(|interface| is_vpn_interface(&interface.name))
         .map(|interface| interface.name.clone())
         .collect();
-    vpn_interfaces.dedup();
+    let vpn_interfaces = unique(vpn_interfaces);
     let host_addresses = interfaces.iter().map(if_addrs::Interface::ip).collect();
     let (current_resolvers, search_domains, resolver_manager) = detect_resolvers();
     let port_53_available = lan_address
@@ -232,6 +232,17 @@ fn detect_environment() -> Option<&'static str> {
         return Some("wsl2");
     }
     None
+}
+
+/// Remove repeated values, keeping the first occurrence of each.
+fn unique<T: PartialEq>(values: Vec<T>) -> Vec<T> {
+    let mut kept = Vec::with_capacity(values.len());
+    for value in values {
+        if !kept.contains(&value) {
+            kept.push(value);
+        }
+    }
+    kept
 }
 
 /// Probe whether localname could bind `address` over UDP and TCP right now.
@@ -408,7 +419,7 @@ pub fn port_owners(_port: u16) -> Vec<PortOwner> {
     Vec::new()
 }
 
-/// Run a short read-only command, giving up after five seconds.
+/// Run a short read-only command, giving up after twenty seconds.
 fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
     let mut child = Command::new(program)
         .args(arguments)
@@ -417,7 +428,7 @@ fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -440,8 +451,44 @@ fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
 fn powershell(script: &str) -> Option<String> {
     command_output(
         "powershell.exe",
-        &["-NoProfile", "-NonInteractive", "-Command", script],
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; {script}"),
+        ],
     )
+}
+
+/// Everything setup needs from Windows, gathered by one PowerShell process: each start
+/// costs about a second, and several under load could exceed their timeout.
+#[cfg(windows)]
+#[derive(Default, serde::Deserialize)]
+struct WindowsFacts {
+    #[serde(default)]
+    gateway: Option<String>,
+    #[serde(default)]
+    resolvers: Vec<String>,
+    #[serde(default)]
+    suffixes: Vec<String>,
+    #[serde(default)]
+    dhcp: Vec<String>,
+}
+
+#[cfg(windows)]
+fn windows_facts() -> &'static WindowsFacts {
+    static FACTS: std::sync::OnceLock<WindowsFacts> = std::sync::OnceLock::new();
+    FACTS.get_or_init(|| {
+        let script = "$r = [ordered]@{}; \
+            $r.gateway = [string](Get-NetRoute -DestinationPrefix 0.0.0.0/0 -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1).NextHop; \
+            $r.resolvers = @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }); \
+            $r.suffixes = @(@((Get-DnsClientGlobalSetting).SuffixSearchList) + @(Get-DnsClient | ForEach-Object { $_.ConnectionSpecificSuffix }) | Where-Object { $_ }); \
+            $r.dhcp = @(Get-NetIPAddress -PrefixOrigin Dhcp -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress }); \
+            $r | ConvertTo-Json -Compress";
+        powershell(script)
+            .and_then(|text| serde_json::from_str(text.trim()).ok())
+            .unwrap_or_default()
+    })
 }
 
 fn detect_default_gateway() -> Option<IpAddr> {
@@ -467,12 +514,7 @@ fn detect_default_gateway() -> Option<IpAddr> {
     }
     #[cfg(windows)]
     {
-        powershell(
-            "Get-NetRoute -DestinationPrefix 0.0.0.0/0 -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty NextHop",
-        )?
-        .trim()
-        .parse()
-        .ok()
+        windows_facts().gateway.as_deref()?.trim().parse().ok()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -484,27 +526,21 @@ fn detect_default_gateway() -> Option<IpAddr> {
 fn detect_resolvers() -> (Vec<IpAddr>, Vec<String>, Option<&'static str>) {
     #[cfg(windows)]
     {
-        let resolvers = powershell(
-            "Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ServerAddresses",
-        )
-        .unwrap_or_default();
-        let suffixes = powershell(
-            "(Get-DnsClientGlobalSetting).SuffixSearchList; Get-DnsClient | Select-Object -ExpandProperty ConnectionSpecificSuffix",
-        )
-        .unwrap_or_default();
-        let mut addresses: Vec<IpAddr> = resolvers
-            .lines()
+        let facts = windows_facts();
+        let addresses: Vec<IpAddr> = facts
+            .resolvers
+            .iter()
             .filter_map(|line| line.trim().parse().ok())
             .filter(|address: &IpAddr| !is_windows_placeholder(*address))
             .collect();
-        addresses.dedup();
-        let mut domains: Vec<String> = suffixes
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
+        let addresses = unique(addresses);
+        let domains: Vec<String> = facts
+            .suffixes
+            .iter()
+            .map(|suffix| suffix.trim().to_owned())
+            .filter(|suffix| !suffix.is_empty())
             .collect();
-        domains.dedup();
+        let domains = unique(domains);
         (addresses, domains, Some("windows"))
     }
     #[cfg(not(windows))]
@@ -517,8 +553,7 @@ fn detect_resolvers() -> (Vec<IpAddr>, Vec<String>, Option<&'static str>) {
             if !upstream.is_empty() {
                 let mut domains = domains;
                 domains.extend(upstream_domains);
-                domains.dedup();
-                return (upstream, domains, Some("systemd-resolved"));
+                return (upstream, unique(domains), Some("systemd-resolved"));
             }
         }
         (resolvers, domains, None)
@@ -557,9 +592,7 @@ fn parse_resolv_conf(path: &str) -> (Vec<IpAddr>, Vec<String>) {
             _ => {}
         }
     }
-    resolvers.dedup();
-    domains.dedup();
-    (resolvers, domains)
+    (unique(resolvers), unique(domains))
 }
 
 /// Whether the address was leased by DHCP (and may change unless reserved).
@@ -581,10 +614,12 @@ fn address_dynamic(interface: &str, address: IpAddr) -> Option<bool> {
     }
     #[cfg(windows)]
     {
-        let origin = powershell(&format!(
-            "(Get-NetIPAddress -IPAddress '{address}' -ErrorAction SilentlyContinue).PrefixOrigin"
-        ))?;
-        Some(origin.trim().eq_ignore_ascii_case("dhcp"))
+        Some(
+            windows_facts()
+                .dhcp
+                .iter()
+                .any(|dhcp| dhcp.parse::<IpAddr>().is_ok_and(|ip| ip == address)),
+        )
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {

@@ -366,6 +366,7 @@ fn plan_or_apply(output: OutputFormat, store: &ConfigStore, args: &PlanArgs) -> 
             data: serde_json::to_value(&plan)?,
             verification: None,
             next_actions,
+            rollback: None,
             message,
         }
         .into());

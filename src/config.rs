@@ -485,6 +485,8 @@ impl ConfigStore {
             .ok_or_else(|| anyhow!("backup directory is missing"))?;
         if !directory.exists() {
             fs::create_dir_all(directory)?;
+            // Windows cannot open directories as files; ownership adoption is Unix-only.
+            #[cfg(unix)]
             adopt_owner(&fs::File::open(directory)?, self.parent())?;
         }
         if path.exists() {

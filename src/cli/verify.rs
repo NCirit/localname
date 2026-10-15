@@ -329,7 +329,7 @@ async fn serves_zone(server: SocketAddr, zone: &str, timeout: Duration) -> bool 
 }
 
 /// Query the zone SOA, then `name`, over one transport. Returns the name's addresses.
-async fn transport_check(
+pub(crate) async fn transport_check(
     server: SocketAddr,
     zone: &str,
     name: &str,
@@ -355,7 +355,7 @@ async fn transport_check(
     Ok(addresses)
 }
 
-async fn system_lookup(name: &str, timeout: Duration) -> Result<Vec<IpAddr>> {
+pub(crate) async fn system_lookup(name: &str, timeout: Duration) -> Result<Vec<IpAddr>> {
     let host = name.trim_end_matches('.').to_owned();
     let addresses = tokio::time::timeout(timeout * 2, tokio::net::lookup_host((host, 0)))
         .await
@@ -424,6 +424,7 @@ fn finish(output: OutputFormat, data: VerifyData) -> Result<()> {
             data: serde_json::to_value(&data)?,
             verification: Some(verification),
             next_actions,
+            rollback: None,
             message,
             human,
         }

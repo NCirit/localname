@@ -66,6 +66,9 @@ impl Listeners {
 pub struct DnsServer {
     _daemon_lock: std::fs::File,
     started: Instant,
+    /// Modification time of the configuration read at startup. Taken before the read, so
+    /// an edit racing with startup is seen as a change and reloaded.
+    loaded_modified: Option<SystemTime>,
     config_store: ConfigStore,
     listen: Vec<SocketAddr>,
     snapshot: ArcSwap<DnsSnapshot>,
@@ -104,6 +107,7 @@ impl DnsServer {
     /// `config`, so a stale caller cannot roll the service back.
     pub fn new(config_store: ConfigStore, mut config: Config) -> Result<Self> {
         let daemon_lock = config_store.acquire_daemon_lock()?;
+        let loaded_modified = modified_time(config_store.path());
         if config_store.exists() {
             config = config_store.load()?;
         }
@@ -113,6 +117,7 @@ impl DnsServer {
         Ok(Self {
             _daemon_lock: daemon_lock,
             started: Instant::now(),
+            loaded_modified,
             config_store,
             listen: config.listen.clone(),
             snapshot: ArcSwap::from_pointee(snapshot),
@@ -505,7 +510,7 @@ async fn handle_tcp(server: &DnsServer, mut stream: TcpStream, peer: SocketAddr)
 /// Pick up configuration edits made outside the control API. Invalid files are rejected and
 /// the previous snapshot keeps serving.
 async fn run_reload(server: Arc<DnsServer>, mut shutdown: watch::Receiver<bool>) -> Result<()> {
-    let mut modified = modified_time(server.config_store.path());
+    let mut modified = server.loaded_modified;
     let mut ticker = time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {

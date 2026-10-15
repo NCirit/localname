@@ -33,6 +33,8 @@ For home-network setup, run `localname setup`. It inspects this host — LAN add
 
 `localname setup rollback` restores what existed before `--apply` and tells you how to set the router back. Setup never changes the router itself. In a container, pass `--listen` with the container address and `--advertise` with the host's LAN address; `--upstream` selects resolvers when the detected ones are unsuitable.
 
+If the router cannot hand out a DNS server, point individual devices at localname instead. `localname client setup --server 192.168.1.10` shows the change; add `--apply` (with `sudo`, or in an administrator PowerShell on Windows) to make it. Only `home.arpa` queries go to localname, through each system's split-DNS mechanism: a systemd-resolved drop-in on Linux, `/etc/resolver/home.arpa` on macOS, and a Name Resolution Policy Table rule on Windows. VPN DNS, other interfaces, and search domains stay as they were; the command compares them before and after and fails if anything else changed. `localname client rollback` removes the change, and `localname client status` shows the current state. On Linux this requires systemd-resolved.
+
 Answers forwarded from the Internet that point a public name at a private, loopback, or link-local address are dropped (DNS rebinding protection). Setup exempts the router's own domain, such as `lan`; list others in `rebind_allowed_domains`. localname also answers Firefox's DNS-over-HTTPS canary domain so Firefox keeps using network DNS and local names; set `firefox_doh_canary = false` to turn that off.
 
 On Linux with systemd, install the hardened service unit from `packaging/systemd`. It runs as a dedicated `localname` account that keeps only the capability to bind port 53, and stores configuration and revisions in `/var/lib/localname`:
@@ -104,5 +106,5 @@ The benchmark starts the release binary as a separate server with 10,000 records
 
 DNS behavior is pinned by `tests/fixtures/conformance.toml`, which runs every case over UDP and TCP.
 
-This is an early development release. Automated router configuration, operating-system DNS integration, service proxying, and trusted HTTPS are still being implemented.
+This is an early development release. Automated router configuration, service proxying, and trusted HTTPS are still being implemented.
 
