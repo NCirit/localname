@@ -308,3 +308,30 @@ fn verify_fails_with_remedies_when_unreachable() {
             .contains("isolation")
     );
 }
+
+#[test]
+fn loopback_listeners_get_no_router_action() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let listen = format!("127.0.0.1:{}", free_port());
+    let plan = json(&run(&path, &["setup", "--listen", &listen]));
+    assert!(plan["data"]["router_action"].is_null(), "{plan}");
+    let check = plan["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "lan_address")
+        .unwrap()
+        .clone();
+    assert!(
+        check["summary"]
+            .as_str()
+            .unwrap()
+            .contains("only this device"),
+        "{check}"
+    );
+    assert!(
+        check["remedy"].as_str().unwrap().contains("client setup"),
+        "{check}"
+    );
+}

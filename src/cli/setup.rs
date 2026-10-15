@@ -231,12 +231,31 @@ fn plan_or_apply(output: OutputFormat, store: &ConfigStore, args: &PlanArgs) -> 
         .filter(|address| !served_by_daemon(address))
         .map(|address| probe_port(*address))
         .collect();
+    // A loopback address means "this device" to every client: a router cannot hand it out.
+    let this_host_only = !args.local && advertise.is_some_and(|ip| ip.is_loopback());
     if args.local {
         checks.push(Check::new(
             "lan_address",
             Status::Info,
             "Loopback development instance; other devices cannot use it.",
         ));
+    } else if this_host_only {
+        let lan = facts
+            .lan_address
+            .map_or_else(|| "its LAN address".to_owned(), |ip| format!("{ip}:53"));
+        checks.push(
+            Check::new(
+                "lan_address",
+                Status::Info,
+                format!(
+                    "{} is a loopback address: only this device can use localname, and no router change applies.",
+                    advertise.map_or_else(String::new, |ip| ip.to_string())
+                ),
+            )
+            .remedy(format!(
+                "Point this device at it with `localname client setup --server 127.0.0.1 --apply`. For other devices, listen on the LAN instead (`--listen {lan}`)."
+            )),
+        );
     } else if listen.is_empty() {
         checks.push(
             Check::new("lan_address", Status::Fail, "No private LAN address was detected.")
@@ -290,7 +309,7 @@ fn plan_or_apply(output: OutputFormat, store: &ConfigStore, args: &PlanArgs) -> 
     }
 
     let router_action = advertise
-        .filter(|_| !args.local)
+        .filter(|_| !args.local && !this_host_only)
         .map(|address| router_action(&facts, address, ipv6_advertise, &upstreams));
     let zone = crate::config::canonical_zone(&args.zone)?;
     let host_record = advertise.map(|_| format!("{HOST_RECORD}.{zone}"));
