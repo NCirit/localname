@@ -136,7 +136,7 @@ fn not_running() -> Value {
 }
 
 /// Apply through the daemon when it runs, otherwise under the offline writer lock.
-fn commit(store: &ConfigStore, request: Request) -> Result<(Applied, bool)> {
+pub(super) fn commit(store: &ConfigStore, request: Request) -> Result<(Applied, bool)> {
     match control::request_if_running(store, &request)? {
         Some(applied) => Ok((applied, true)),
         None => Ok((control::apply_offline(store, request)?, false)),

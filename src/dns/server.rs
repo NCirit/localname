@@ -41,6 +41,8 @@ const TCP_IDLE: Duration = Duration::from_secs(10);
 /// then drop privileges before any configuration or client data is processed.
 pub struct Listeners {
     bound: Vec<(SocketAddr, UdpSocket, TcpListener)>,
+    /// Service proxy listeners; empty in DNS-only mode.
+    proxy: Vec<(SocketAddr, TcpListener)>,
 }
 
 impl Listeners {
@@ -55,11 +57,30 @@ impl Listeners {
                 .with_context(|| format!("failed to bind TCP {address}"))?;
             bound.push((*address, udp, tcp));
         }
-        Ok(Self { bound })
+        Ok(Self {
+            bound,
+            proxy: Vec::new(),
+        })
+    }
+
+    /// Bind DNS listeners and, only when the configuration enables it, the proxy.
+    pub async fn bind_config(config: &Config) -> Result<Self> {
+        let mut listeners = Self::bind(&config.listen).await?;
+        for address in &config.proxy_listen {
+            let tcp = TcpListener::bind(address)
+                .await
+                .with_context(|| format!("failed to bind proxy TCP {address}"))?;
+            listeners.proxy.push((*address, tcp));
+        }
+        Ok(listeners)
     }
 
     pub fn addresses(&self) -> Vec<SocketAddr> {
         self.bound.iter().map(|(address, _, _)| *address).collect()
+    }
+
+    pub fn proxy_addresses(&self) -> Vec<SocketAddr> {
+        self.proxy.iter().map(|(address, _)| *address).collect()
     }
 }
 
@@ -77,6 +98,10 @@ pub struct DnsServer {
     forwards: Arc<Semaphore>,
     tcp_connections: Arc<Semaphore>,
     tcp_clients: Mutex<HashMap<IpAddr, usize>>,
+    proxy_listen: Vec<SocketAddr>,
+    /// Present only when the configuration enables the proxy.
+    #[cfg(feature = "proxy")]
+    proxy: Option<Arc<crate::proxy::Proxy>>,
 }
 
 enum Outcome {
@@ -126,6 +151,10 @@ impl DnsServer {
             forwards: Arc::new(Semaphore::new(MAX_FORWARDS)),
             tcp_connections: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
             tcp_clients: Mutex::new(HashMap::new()),
+            proxy_listen: config.proxy_listen.clone(),
+            #[cfg(feature = "proxy")]
+            proxy: (!config.proxy_listen.is_empty())
+                .then(|| Arc::new(crate::proxy::Proxy::new(&config))),
         })
     }
 
@@ -142,8 +171,15 @@ impl DnsServer {
         if config.listen != self.listen {
             bail!("listener changes require a service restart");
         }
+        if config.proxy_listen != self.proxy_listen {
+            bail!("proxy listener changes require a service restart");
+        }
         let snapshot = DnsSnapshot::from_config(config)?;
         self.forwarder.reset(&config.upstreams);
+        #[cfg(feature = "proxy")]
+        if let Some(proxy) = &self.proxy {
+            proxy.install(config);
+        }
         self.snapshot.store(Arc::new(snapshot));
         Ok(())
     }
@@ -156,12 +192,29 @@ impl DnsServer {
             uptime_seconds: self.started.elapsed().as_secs(),
             cache_entries: self.forwarder.cache_len(),
             metrics: self.metrics.snapshot(),
+            #[cfg(feature = "proxy")]
+            proxy: self.proxy.as_ref().map(|proxy| proxy.status()),
+            #[cfg(not(feature = "proxy"))]
+            proxy: None,
         }
     }
 
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<()> {
-        let listeners = Listeners::bind(&self.listen).await?;
+        let mut listeners = Listeners::bind(&self.listen).await?;
+        for address in &self.proxy_listen {
+            listeners
+                .proxy
+                .push((*address, TcpListener::bind(address).await?));
+        }
         self.run_with(listeners, shutdown).await
+    }
+
+    /// Whether the service proxy runs; false in DNS-only mode.
+    pub fn proxy_active(&self) -> bool {
+        #[cfg(feature = "proxy")]
+        return self.proxy.is_some();
+        #[cfg(not(feature = "proxy"))]
+        false
     }
 
     pub async fn run_with(
@@ -169,7 +222,8 @@ impl DnsServer {
         listeners: Listeners,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<()> {
-        if listeners.addresses() != self.listen {
+        if listeners.addresses() != self.listen || listeners.proxy_addresses() != self.proxy_listen
+        {
             bail!("bound listeners do not match the configuration");
         }
         let server = Arc::new(self);
@@ -188,6 +242,17 @@ impl DnsServer {
                 ));
             }
             tasks.spawn(run_tcp(Arc::clone(&server), tcp, shutdown.clone()));
+        }
+        #[cfg(feature = "proxy")]
+        if let Some(proxy) = &server.proxy {
+            for (address, listener) in listeners.proxy {
+                info!(%address, "service proxy ready");
+                tasks.spawn(crate::proxy::serve(
+                    Arc::clone(proxy),
+                    listener,
+                    shutdown.clone(),
+                ));
+            }
         }
         tasks.spawn(run_reload(Arc::clone(&server), shutdown.clone()));
         #[cfg(any(unix, windows))]

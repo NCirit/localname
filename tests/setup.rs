@@ -180,6 +180,7 @@ fn reapplying_updates_existing_configuration_and_rolls_back_as_revision() {
             .success()
     );
     assert!(run(&path, &["add", "nas", "192.168.1.20"]).status.success());
+    let local = json(&run(&path, &["config", "show"]))["data"]["listen"][0].clone();
     let port = free_port();
     let applied = json(&apply(&path, port));
     assert_eq!(applied["revision"], 2);
@@ -192,7 +193,7 @@ fn reapplying_updates_existing_configuration_and_rolls_back_as_revision() {
             "setup",
             "--apply",
             "--listen",
-            "127.0.0.1:5354",
+            &format!("127.0.0.1:{}", free_port()),
             "--expect-revision",
             "1",
         ],
@@ -202,7 +203,7 @@ fn reapplying_updates_existing_configuration_and_rolls_back_as_revision() {
     let rolled_back = json(&run(&path, &["setup", "rollback"]));
     assert_eq!(rolled_back["revision"], 3);
     let config = json(&run(&path, &["config", "show"]));
-    assert_eq!(config["data"]["listen"][0], "127.0.0.1:5354");
+    assert_eq!(config["data"]["listen"][0], local);
     assert_eq!(config["data"]["records"].as_array().unwrap().len(), 1);
 }
 

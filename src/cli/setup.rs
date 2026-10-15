@@ -462,9 +462,21 @@ fn plan_or_apply(output: OutputFormat, store: &ConfigStore, args: &PlanArgs) -> 
     print_result(output, envelope, move || human)
 }
 
+/// Loopback address for a development instance: port 5354, or the next free port up to
+/// 5399 when another program (such as an mDNS helper) already holds it.
+fn local_listener() -> SocketAddr {
+    (5354..=5399)
+        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+        .find(|address| {
+            let probe = probe_port(*address);
+            probe.udp == PortState::Available && probe.tcp == PortState::Available
+        })
+        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 5354)))
+}
+
 fn choose_listeners(args: &PlanArgs, facts: &NetworkFacts) -> Vec<SocketAddr> {
     if args.local {
-        return vec![SocketAddr::from(([127, 0, 0, 1], 5354))];
+        return vec![local_listener()];
     }
     if !args.listen.is_empty() {
         return args.listen.clone();
@@ -917,9 +929,12 @@ fn render_human(plan: &SetupPlan, args: &PlanArgs) -> String {
     }
     if plan.applied && args.local {
         lines.push(String::new());
-        lines.push(
-            "Loopback configuration created at 127.0.0.1:5354. Start `localname serve`.".into(),
-        );
+        lines.push(format!(
+            "Loopback configuration created at {}. Start `localname serve`.",
+            plan.listen
+                .first()
+                .map_or_else(String::new, ToString::to_string)
+        ));
         return lines.join("\n");
     }
     if let Some(action) = &plan.router_action {

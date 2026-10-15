@@ -1,1 +1,1 @@
-doc-valid-idents = ["OpenWrt", ".."]
+doc-valid-idents = ["OpenWrt", "WebSocket", "WebSockets", ".."]

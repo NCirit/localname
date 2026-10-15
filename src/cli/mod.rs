@@ -2,6 +2,7 @@ mod client;
 mod health;
 mod records;
 mod router;
+mod services;
 mod setup;
 mod verify;
 
@@ -77,6 +78,16 @@ enum Command {
     Revisions,
     /// Restore a previous configuration revision as a new revision.
     Rollback(records::RollbackArgs),
+    /// Route service names to LAN backends through the optional HTTP proxy.
+    Service {
+        #[command(subcommand)]
+        command: services::ServiceCommand,
+    },
+    /// Turn the optional HTTP/WebSocket proxy on or off.
+    Proxy {
+        #[command(subcommand)]
+        command: services::ProxyCommand,
+    },
     /// Point this device at localname when the router cannot advertise it.
     Client {
         #[command(subcommand)]
@@ -308,6 +319,8 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
         Command::List => records::list(output, &store),
         Command::Revisions => records::revisions(output, &store),
         Command::Rollback(args) => records::rollback(output, &store, &args).await,
+        Command::Service { command } => services::service(output, &store, command).await,
+        Command::Proxy { command } => services::proxy(output, &store, &command),
         Command::Client { command } => client::run(output, &command).await,
         Command::Router { command } => router::run(output, non_interactive, &store, command).await,
         Command::Config { command } => config_command(output, &store, command),
@@ -333,7 +346,7 @@ pub fn command_reference() -> Vec<Value> {
 
 async fn serve(store: ConfigStore, args: ServeArgs) -> Result<()> {
     let config = store.load()?;
-    let listeners = crate::Listeners::bind(&config.listen).await?;
+    let listeners = crate::Listeners::bind_config(&config).await?;
     if let Some(user) = &args.user {
         crate::privilege::drop_to(user)?;
         tracing::info!(%user, "dropped root privileges after binding listeners");

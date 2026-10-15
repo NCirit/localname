@@ -17,6 +17,17 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
       - run: cargo build --locked --release
+  dns-only:
+    # Decision 10: a build without the proxy feature has no HTTP dependencies at all.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: "! cargo tree --locked --no-default-features -e normal | grep -E 'hyper|http-body'"
+      - run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - run: cargo test --locked --no-default-features --all-targets
   msrv:
     runs-on: ubuntu-latest
     steps:

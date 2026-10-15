@@ -100,10 +100,30 @@ impl DnsSnapshot {
         let zone = Name::from_str(&config.zone).context("invalid zone")?;
         let mut names: HashMap<Box<str>, NameEntry> =
             HashMap::with_capacity(config.records.len() * 2);
+        let mut owners: Vec<&str> = Vec::with_capacity(config.records.len());
         for entry in &config.records {
             insert_record(&mut names, entry);
+            owners.push(&entry.name);
+        }
+        // Service names resolve to the proxy, which routes them by Host header.
+        for service in &config.services {
+            let entry = names.entry(service.name.as_str().into()).or_default();
+            for listen in &config.proxy_listen {
+                match listen.ip() {
+                    IpAddr::V4(v4) if !entry.v4.iter().any(|(ip, _)| *ip == v4) => {
+                        entry.v4.push((v4, 60));
+                    }
+                    IpAddr::V6(v6) if !entry.v6.iter().any(|(ip, _)| *ip == v6) => {
+                        entry.v6.push((v6, 60));
+                    }
+                    _ => {}
+                }
+            }
+            owners.push(&service.name);
+        }
+        for owner in owners {
             // Empty non-terminals exist (NODATA, not NXDOMAIN) per RFC 8020.
-            let mut parent = entry.name.as_str();
+            let mut parent = owner;
             while let Some((_, next)) = parent.split_once('.') {
                 if !name_in_zone(next, &config.zone) {
                     break;
@@ -510,6 +530,26 @@ mod tests {
         assert_eq!(response.answers.len(), 2);
         assert_eq!(response.answers[0].record_type(), RecordType::CNAME);
         assert_eq!(response.answers[1].record_type(), RecordType::A);
+    }
+
+    #[cfg(feature = "proxy")]
+    #[test]
+    fn service_names_resolve_to_the_proxy() {
+        let mut config = config_with_record();
+        config.proxy_listen = vec![
+            "127.0.0.1:8080".parse().unwrap(),
+            "127.0.0.1:8081".parse().unwrap(),
+        ];
+        config.services.push(crate::config::ServiceConfig {
+            name: "photos.media".into(),
+            target: "192.168.1.20:2342".parse().unwrap(),
+            https: false,
+        });
+        config.validate().unwrap();
+        let snapshot = DnsSnapshot::from_config(&config).unwrap();
+        let entry = &snapshot.names["photos.media.home.arpa."];
+        assert_eq!(entry.v4, vec![("127.0.0.1".parse().unwrap(), 60)]);
+        assert!(snapshot.names.contains_key("media.home.arpa."));
     }
 
     #[test]

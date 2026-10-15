@@ -6,7 +6,7 @@ use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Config, ConfigStore, RecordConfig,
+    Config, ConfigStore, RecordConfig, ServiceConfig,
     dns::MetricsSnapshot,
     error::{CodedError, ErrorCode, coded},
 };
@@ -34,6 +34,17 @@ pub enum Request {
     },
     Rollback {
         revision: u64,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+    /// Add or replace the service with this name.
+    AddService {
+        service: ServiceConfig,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+    RemoveService {
+        name: String,
         #[serde(default)]
         expected_revision: Option<u64>,
     },
@@ -67,7 +78,18 @@ pub struct DaemonStatus {
     pub uptime_seconds: u64,
     pub cache_entries: usize,
     pub metrics: MetricsSnapshot,
+    /// Service proxy counters; absent in DNS-only mode.
+    #[serde(default)]
+    pub proxy: Option<ProxyStatus>,
 }
+
+#[cfg(feature = "proxy")]
+pub use crate::proxy::ProxyStatus;
+
+/// Placeholder in builds without the proxy: the field is always `None`.
+#[cfg(not(feature = "proxy"))]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProxyStatus {}
 
 pub fn socket_path(config_path: &Path) -> PathBuf {
     config_path.with_extension("sock")
@@ -270,6 +292,27 @@ pub fn apply(store: &ConfigStore, request: Request) -> Result<Applied> {
             revision,
             expected_revision,
         } => store.rollback_expected(revision, expected_revision)?,
+        Request::AddService {
+            service,
+            expected_revision,
+        } => store.mutate(expected_revision, |config| {
+            match config
+                .services
+                .iter_mut()
+                .find(|existing| existing.name == service.name)
+            {
+                Some(existing) => *existing = service,
+                None => config.services.push(service),
+            }
+            Ok(())
+        })?,
+        Request::RemoveService {
+            name,
+            expected_revision,
+        } => store.mutate(expected_revision, |config| {
+            config.services.retain(|service| service.name != name);
+            Ok(())
+        })?,
         Request::Status => {
             return Err(coded(
                 ErrorCode::Unavailable,

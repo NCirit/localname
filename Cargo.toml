@@ -14,6 +14,9 @@ dirs = "6.0"
 fs2 = "0.4"
 getrandom = "0.3"
 hickory-proto = "0.26"
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", default-features = false, features = ["http1", "server", "client"], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"], optional = true }
 if-addrs = "0.15"
 ipnet = { version = "2.11", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -45,4 +48,9 @@ must_use_candidate = "allow"
 
 [target."cfg(unix)".dependencies]
 nix = { version = "0.30", default-features = false, features = ["user", "fs"] }
+
+[features]
+default = ["proxy"]
+# HTTP/WebSocket service proxy (decision 10: optional; DNS-only builds omit it).
+proxy = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 

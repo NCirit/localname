@@ -7,6 +7,8 @@ pub mod error;
 pub mod integration;
 pub mod output;
 pub mod privilege;
+#[cfg(feature = "proxy")]
+pub mod proxy;
 pub mod router;
 
 pub use config::{Config, ConfigStore, RecordConfig, ServiceConfig};

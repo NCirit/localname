@@ -36,6 +36,9 @@ pub struct Config {
     /// Answer Firefox's DNS-over-HTTPS canary domain with NXDOMAIN so it keeps using this
     /// resolver.
     pub firefox_doh_canary: bool,
+    /// Addresses of the optional HTTP/WebSocket service proxy. Empty means DNS-only mode:
+    /// no proxy listener or proxy task exists.
+    pub proxy_listen: Vec<SocketAddr>,
     pub records: Vec<RecordConfig>,
     pub services: Vec<ServiceConfig>,
 }
@@ -48,6 +51,8 @@ pub struct RecordConfig {
     pub ttl: u32,
 }
 
+/// A name the proxy routes by HTTP `Host` to a backend on the LAN. Its DNS name
+/// resolves to the proxy's addresses.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceConfig {
     pub name: String,
@@ -80,6 +85,7 @@ impl Default for Config {
             rebind_protection: true,
             rebind_allowed_domains: Vec::new(),
             firefox_doh_canary: true,
+            proxy_listen: Vec::new(),
             records: Vec::new(),
             services: Vec::new(),
         }
@@ -114,9 +120,7 @@ impl Config {
         if self.upstreams.is_empty() {
             bail!("at least one upstream resolver is required");
         }
-        if !self.services.is_empty() {
-            bail!("service proxying is not supported in this release");
-        }
+        self.validate_proxy()?;
         for listen in &self.listen {
             if listen.port() == 0 || !is_private_address(listen.ip()) {
                 bail!(
@@ -214,8 +218,62 @@ impl Config {
         let mut service_names = HashSet::new();
         for service in &mut self.services {
             service.name = canonical_name(&service.name, &zone)?;
+            if !name_in_zone(&service.name, &zone) {
+                bail!("service {} is outside configured zone {zone}", service.name);
+            }
             if !service_names.insert(service.name.clone()) {
                 bail!("duplicate service name {}", service.name);
+            }
+            if by_name.contains_key(&service.name) {
+                bail!(
+                    "{} is both a record and a service; a service name resolves to the proxy",
+                    service.name
+                );
+            }
+            if service.target.port() == 0 || !is_private_address(service.target.ip()) {
+                bail!(
+                    "service {} must target a private or loopback address with a nonzero port",
+                    service.name
+                );
+            }
+            if self.proxy_listen.contains(&service.target) {
+                bail!(
+                    "forwarding loop: service {} targets the proxy itself",
+                    service.name
+                );
+            }
+            if service.https {
+                bail!(
+                    "HTTPS for service {} requires an HTTPS trust mode, which is not available in this release",
+                    service.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The proxy is opt-in: services need a proxy listener, and a build without the proxy
+    /// feature accepts neither.
+    fn validate_proxy(&self) -> Result<()> {
+        if !cfg!(feature = "proxy") && (!self.services.is_empty() || !self.proxy_listen.is_empty())
+        {
+            bail!(
+                "service proxying is unsupported: this build was compiled without the proxy feature"
+            );
+        }
+        if !self.services.is_empty() && self.proxy_listen.is_empty() {
+            bail!("services require proxy_listen; enable the proxy with `localname proxy enable`");
+        }
+        let mut seen = HashSet::new();
+        for listen in &self.proxy_listen {
+            if listen.port() == 0 || !is_private_address(listen.ip()) {
+                bail!("proxy_listen must select a private or loopback interface and nonzero port");
+            }
+            if !seen.insert(listen) {
+                bail!("duplicate proxy listener {listen}");
+            }
+            if self.listen.contains(listen) {
+                bail!("proxy listener {listen} is also a DNS listener");
             }
         }
         Ok(())
@@ -831,6 +889,65 @@ ttl = 60
         };
         config.validate().unwrap();
         assert_eq!(config.rebind_allowed_domains, ["lan.", "fritz.box."]);
+    }
+
+    fn proxied(services: Vec<ServiceConfig>) -> Config {
+        Config {
+            proxy_listen: vec!["127.0.0.1:8080".parse().unwrap()],
+            services,
+            ..Config::default()
+        }
+    }
+
+    fn service(name: &str, target: &str) -> ServiceConfig {
+        ServiceConfig {
+            name: name.into(),
+            target: target.parse().unwrap(),
+            https: false,
+        }
+    }
+
+    #[cfg(feature = "proxy")]
+    #[test]
+    fn services_require_the_proxy_and_private_targets() {
+        let mut config = proxied(vec![service("photos", "192.168.1.20:2342")]);
+        config.validate().unwrap();
+        assert_eq!(config.services[0].name, "photos.home.arpa.");
+        config.proxy_listen.clear();
+        assert!(config.validate().is_err());
+        assert!(
+            proxied(vec![service("x", "8.8.8.8:80")])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            proxied(vec![service("x", "127.0.0.1:8080")])
+                .validate()
+                .is_err()
+        );
+        let mut https = proxied(vec![service("x", "192.168.1.20:443")]);
+        https.services[0].https = true;
+        assert!(https.validate().is_err());
+        let mut clash = proxied(vec![service("nas", "192.168.1.20:80")]);
+        clash.records.push(RecordConfig {
+            name: "nas".into(),
+            value: "192.168.1.20".into(),
+            ttl: 60,
+        });
+        assert!(clash.validate().is_err());
+        let mut public = proxied(Vec::new());
+        public.proxy_listen = vec!["0.0.0.0:80".parse().unwrap()];
+        assert!(public.validate().is_err());
+    }
+
+    #[cfg(not(feature = "proxy"))]
+    #[test]
+    fn dns_only_builds_reject_proxy_configuration() {
+        let error = proxied(vec![service("photos", "192.168.1.20:2342")])
+            .validate()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("without the proxy feature"));
+        assert!(proxied(Vec::new()).validate().is_err());
     }
 
     #[test]

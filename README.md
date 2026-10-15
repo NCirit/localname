@@ -74,6 +74,33 @@ docker compose exec localname localname --config /var/lib/localname/config.toml 
 
 Set your router's LAN/DHCP DNS server to `LOCALNAME_LAN_IP`, then reconnect a second device and check `nslookup nas.home.arpa`. The container publishes both DNS transports on the selected LAN address, runs without root or extra capabilities, and keeps configuration in a named volume. Host port 53 must be free. If the Docker subnet `172.30.55.0/24` overlaps an existing network, change the subnet and container address together in `compose.yml` and update the persisted listener address with the service stopped.
 
+### Optional service proxy
+
+DNS maps names to addresses, not ports. To reach `http://photos.home.arpa/` instead of `http://192.168.1.20:2342/`, turn on the HTTP/WebSocket proxy while the service is stopped, then add services:
+
+```console
+localname proxy enable                      # port 80 on the DNS listener address
+localname serve                             # or restart the installed service
+localname service add photos 192.168.1.20:2342
+localname service list
+localname service remove photos
+```
+
+A service name resolves to the proxy, which routes requests by their `Host` header and passes WebSocket upgrades through. Backends must be on private addresses; only clients in `allowed_clients` may use the proxy. The proxy is off by default: without `proxy_listen`, localname opens no HTTP port and starts no proxy task, and `cargo build --no-default-features` leaves the proxy out entirely. `localname proxy disable` returns to DNS-only mode once no services remain. HTTPS for services is not available yet.
+
+When a backend fails, the proxy answers with a short plain-text error naming the service and backend:
+
+| Situation | Response |
+| --- | --- |
+| No service has the requested name | 404 Not Found |
+| Request without a `Host` header | 400 Bad Request |
+| Client outside `allowed_clients` | 403 Forbidden |
+| Backend refuses or resets the connection | 502 Bad Gateway |
+| Backend does not accept within 5 s, or sends no response headers within 60 s | 504 Gateway Timeout |
+| Backend fails while sending a response | The client connection is closed |
+
+`localname service add` checks that the name resolves to the proxy and that the proxy routes it; an unreachable backend is reported as a warning. `localname status` shows aggregate proxy counters.
+
 The CLI supports IPv4/IPv6 address records, local aliases, reverse lookup, upstream forwarding, bounded caching, live record reload, previews, and revision rollback. Use `--config PATH` to select a configuration file and `--output json` for automation.
 
 Names follow zone-file rules: `printer.office` means `printer.office.home.arpa`, and a trailing dot marks a name outside the zone, so an alias to an external host is written `localname add tv roku.example.com.`. Aliases to local names must point at a name that exists.
@@ -117,5 +144,5 @@ The benchmark starts the release binary as a separate server with 10,000 records
 
 DNS behavior is pinned by `tests/fixtures/conformance.toml`, which runs every case over UDP and TCP.
 
-This is an early development release. Service proxying and trusted HTTPS are still being implemented.
+This is an early development release. Trusted HTTPS is still being implemented.
 
