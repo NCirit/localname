@@ -1,0 +1,50 @@
+# OpenWrt adapter matrix (M3c). Driven by tests/router/run.sh, which reboots the router.
+services:
+  openwrt:
+    build:
+      context: ../..
+      dockerfile: tests/router/Dockerfile
+      target: openwrt
+    # procd, netifd, and the firewall manage the network namespace like real hardware.
+    privileged: true
+    networks:
+      lan:
+        ipv4_address: 10.56.0.1
+  server:
+    build:
+      context: ../..
+      dockerfile: tests/router/Dockerfile
+      target: host
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        localname --config /srv/config.toml setup --apply --listen 10.56.0.20:53 --advertise 10.56.0.20 --upstream 10.56.0.1:53 >/dev/null
+        exec localname --config /srv/config.toml serve
+    networks:
+      lan:
+        ipv4_address: 10.56.0.20
+  admin:
+    build:
+      context: ../..
+      dockerfile: tests/router/Dockerfile
+      target: host
+    networks:
+      lan:
+        ipv4_address: 10.56.0.30
+  client:
+    build:
+      context: ../..
+      dockerfile: tests/router/Dockerfile
+      target: host
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      lan:
+        ipv4_address: 10.56.0.40
+networks:
+  lan:
+    # Not internal: Docker drops DHCP broadcasts on internal networks.
+    ipam:
+      config:
+        - subnet: 10.56.0.0/24
+          gateway: 10.56.0.254

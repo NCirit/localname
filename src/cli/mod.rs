@@ -1,6 +1,7 @@
 mod client;
 mod health;
 mod records;
+mod router;
 mod setup;
 mod verify;
 
@@ -80,6 +81,11 @@ enum Command {
     Client {
         #[command(subcommand)]
         command: client::ClientCommand,
+    },
+    /// Point the home router's DHCP DNS setting at localname (OpenWrt, over SSH).
+    Router {
+        #[command(subcommand)]
+        command: router::RouterCommand,
     },
     /// Validate configuration.
     Config {
@@ -253,6 +259,7 @@ fn init_tracing(json_output: bool) {
 
 async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
     let output = cli.output;
+    let non_interactive = cli.non_interactive;
     match cli.command {
         Command::Version => {
             let data = json!({
@@ -302,6 +309,7 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
         Command::Revisions => records::revisions(output, &store),
         Command::Rollback(args) => records::rollback(output, &store, &args).await,
         Command::Client { command } => client::run(output, &command).await,
+        Command::Router { command } => router::run(output, non_interactive, &store, command).await,
         Command::Config { command } => config_command(output, &store, command),
     }
 }

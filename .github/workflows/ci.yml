@@ -67,6 +67,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: tests/client/windows.ps1
         shell: pwsh
+  router-openwrt:
+    # OpenWrt adapter matrix: changed-state failure, clean and repeated apply, reboot
+    # persistence, rollback, and rollback conflicts against an OpenWrt 24.10 rootfs (M3c).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/router/run.sh
   benchmark:
     # Performance budgets (see README): local answers p99 <= 5 ms at a paced 10k queries/s
     # with 10k records, server RSS <= 64 MiB, release binary <= 10 MiB, zero errors.

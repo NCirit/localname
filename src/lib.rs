@@ -7,6 +7,7 @@ pub mod error;
 pub mod integration;
 pub mod output;
 pub mod privilege;
+pub mod router;
 
 pub use config::{Config, ConfigStore, RecordConfig, ServiceConfig};
 pub use dns::{

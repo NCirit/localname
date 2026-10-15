@@ -31,7 +31,18 @@ For home-network setup, run `localname setup`. It inspects this host — LAN add
 2. On the router's LAN/DHCP page, set the DNS server handed to devices to the address setup shows, and leave the secondary DNS server empty. Setup lists the exact steps, including reserving the address and the IPv6 DNS setting when your network needs them.
 3. Reconnect a second device and run `localname setup verify` on it. It finds localname through that device's DNS settings and checks UDP, TCP, and the system resolver. Without localname on that device, `nslookup localname.home.arpa` must return the server's address.
 
-`localname setup rollback` restores what existed before `--apply` and tells you how to set the router back. Setup never changes the router itself. In a container, pass `--listen` with the container address and `--advertise` with the host's LAN address; `--upstream` selects resolvers when the detected ones are unsuitable.
+`localname setup rollback` restores what existed before `--apply` and tells you how to set the router back. `localname setup` never changes the router itself; see `localname router` below for OpenWrt. In a container, pass `--listen` with the container address and `--advertise` with the host's LAN address; `--upstream` selects resolvers when the detected ones are unsuitable.
+
+On an OpenWrt router, localname can make the router change itself over SSH, using your own SSH keys or agent; it never stores router credentials:
+
+```console
+localname router plan --host 192.168.1.1
+localname router apply --host 192.168.1.1 --expect-state FINGERPRINT
+localname router status --host 192.168.1.1
+localname router rollback --host 192.168.1.1
+```
+
+`plan` shows the exact UCI changes: DHCP option 6 on the LAN set to this host, every other DHCP option kept, and IPv6 DNS announcements pointed at localname's unique-local address or turned off. `apply` refuses if the router's DHCP configuration changed since the plan, commits the change so it survives reboots, and checks that dnsmasq serves it. The values it replaced are saved beside the configuration, and `rollback` restores them exactly — unless someone changed the router since, in which case it refuses. Connect once with `ssh root@192.168.1.1` to verify the host key, or pass `--accept-new-host-key` on a network you trust.
 
 If the router cannot hand out a DNS server, point individual devices at localname instead. `localname client setup --server 192.168.1.10` shows the change; add `--apply` (with `sudo`, or in an administrator PowerShell on Windows) to make it. Only `home.arpa` queries go to localname, through each system's split-DNS mechanism: a systemd-resolved drop-in on Linux, `/etc/resolver/home.arpa` on macOS, and a Name Resolution Policy Table rule on Windows. VPN DNS, other interfaces, and search domains stay as they were; the command compares them before and after and fails if anything else changed. `localname client rollback` removes the change, and `localname client status` shows the current state. On Linux this requires systemd-resolved.
 
@@ -106,5 +117,5 @@ The benchmark starts the release binary as a separate server with 10,000 records
 
 DNS behavior is pinned by `tests/fixtures/conformance.toml`, which runs every case over UDP and TCP.
 
-This is an early development release. Automated router configuration, service proxying, and trusted HTTPS are still being implemented.
+This is an early development release. Service proxying and trusted HTTPS are still being implemented.
 
