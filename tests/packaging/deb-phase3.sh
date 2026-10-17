@@ -11,7 +11,7 @@ test ! -e /usr/bin/localname
 test -f /var/lib/localname/config.toml
 id localname >/dev/null
 echo "deb: removal kept data and account"
-apt-get install -y -q /packages/localname_1.0.0_amd64.deb >/dev/null
+apt-get install -y -q /packages/localname_${LOCALNAME_VERSION}_amd64.deb >/dev/null
 systemctl enable --now localname >/dev/null 2>&1
 wait_dns nas.home.arpa 192.168.1.20
 apt-get purge -y -q localname >/dev/null

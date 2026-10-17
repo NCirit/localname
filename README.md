@@ -6,11 +6,11 @@
 
 ## Install
 
-**From a release** (Linux x86-64/ARM64 `.deb`/`.rpm`, archives for Linux, macOS, and Windows, or the image `ghcr.io/ncirit/localname`). Each file ships with an SBOM, a SHA-256 checksum, a Sigstore bundle, and a provenance attestation:
+**From a release** (Linux x86-64/ARM64 `.deb`/`.rpm`, archives for Linux, macOS, and Windows, or the image `ghcr.io/ncirit/localname`). Each file ships with an SBOM, a SHA-256 checksum, a Sigstore bundle, and a provenance attestation (replace `VERSION`):
 
 ```console
-gh attestation verify localname_1.0.0_amd64.deb --repo NCirit/localname
-sudo apt install ./localname_1.0.0_amd64.deb
+gh attestation verify localname_VERSION_amd64.deb --repo NCirit/localname
+sudo apt install ./localname_VERSION_amd64.deb
 ```
 
 **From source** (Rust 1.88+):

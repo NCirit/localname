@@ -1,9 +1,10 @@
 #!/bin/sh
-# Container upgrade (M5): a 0.1.0 image writes state to a volume; the 1.0.0 image serves
+# Container upgrade (M5): a 0.1.0 image writes state to a volume; the current image serves
 # it unchanged, migrates on the next write, and keeps older revisions restorable.
 set -eu
 cd "$(dirname "$0")/../.."
 old_commit=${LOCALNAME_OLD_COMMIT:-cd8fc7d}
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
 work=$(mktemp -d)
 volume=localname-upgrade-$$
 cleanup() {
@@ -36,11 +37,11 @@ L add printer 192.168.1.30 >/dev/null
 docker rm -f localname-upgrade >/dev/null
 
 start localname:upgrade-new
-L version | grep -q "localname 1.0.0"
+L version | grep -q "localname $version"
 resolve nas | grep -q 192.168.1.20
 resolve printer | grep -q 192.168.1.30
 L add tv 192.168.1.40 --output json | grep -q '"status":"passed"'
 L config show | grep -q '^schema = 2'
 L rollback 1 --output json | grep -q '"status":"passed"'
 if resolve printer | grep -q 192.168.1.30; then echo "rollback across schemas failed" >&2; exit 1; fi
-echo "container: 0.1.0 volume upgraded to 1.0.0"
+echo "container: 0.1.0 volume upgraded to $version"
