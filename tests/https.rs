@@ -219,11 +219,12 @@ async fn local_ca_serves_trusted_https_and_rolls_back() {
     assert!(!path.with_extension("trust.json").exists());
     let preview = run(&path, &["https", "trust", "install", "--dry-run"]);
     if preview.status.success() {
-        assert!(
-            !json(&preview)["data"]["commands"]
+        assert_ne!(
+            json(&preview)["data"]["commands"]
                 .as_array()
                 .unwrap()
-                .is_empty()
+                .as_slice(),
+            [] as [serde_json::Value; 0]
         );
     }
 

@@ -203,7 +203,10 @@ fn committed_change_with_failed_dns_readback_returns_rollback_data() {
         "{}",
         String::from_utf8_lossy(&restored.stderr)
     );
-    assert!(ConfigStore::new(&path).load().unwrap().records.is_empty());
+    assert_eq!(
+        ConfigStore::new(&path).load().unwrap().records,
+        [] as [localname::RecordConfig; 0]
+    );
     assert_eq!(result["error"]["code"], "VERIFICATION_FAILED");
 }
 

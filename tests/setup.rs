@@ -226,7 +226,10 @@ fn port_conflicts_block_apply_with_a_specific_remedy() {
         .unwrap_or_else(|| panic!("{result}"));
     assert_eq!(conflict["status"], "fail");
     assert!(conflict["summary"].as_str().unwrap().contains("UDP"));
-    assert!(!result["next_actions"].as_array().unwrap().is_empty());
+    assert_ne!(
+        result["next_actions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     assert!(!path.exists());
     drop(holder);
 }
