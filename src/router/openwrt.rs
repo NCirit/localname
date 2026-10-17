@@ -366,7 +366,10 @@ mod tests {
         assert!(changes.contains(&"uci add_list dhcp.lan.dhcp_option='6,10.0.0.20'".to_owned()));
         assert!(changes.contains(&"uci set dhcp.lan.dns_service='0'".to_owned()));
         // Applying the result again changes nothing.
-        assert!(commands(&next, &desired_settings(&next, &desired, true)).is_empty());
+        assert_eq!(
+            commands(&next, &desired_settings(&next, &desired, true)),
+            [] as [String; 0]
+        );
         // Restoring the captured state is the reverse change.
         let back = commands(&next, &current);
         assert!(back.contains(&"uci add_list dhcp.lan.dhcp_option='6,8.8.8.8'".to_owned()));

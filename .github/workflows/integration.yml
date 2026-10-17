@@ -1,0 +1,169 @@
+name: Integration
+# Heavy suites, manual only: pick one (or all) under Actions > Integration > Run workflow.
+# Each also runs locally from its script.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Suite to run
+        required: true
+        type: choice
+        options:
+          - all
+          - test-macos
+          - test-windows
+          - network
+          - whole-home-setup
+          - systemd
+          - packages
+          - router-openwrt
+          - https
+          - client-linux
+          - client-macos
+          - client-windows
+          - daemon-linux
+          - daemon-macos
+          - daemon-windows
+          - benchmark
+          - soak
+permissions:
+  contents: read
+jobs:
+  test-macos:
+    if: inputs.suite == 'all' || inputs.suite == 'test-macos'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --all-targets
+  test-windows:
+    if: inputs.suite == 'all' || inputs.suite == 'test-windows'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --all-targets
+  network:
+    if: inputs.suite == 'all' || inputs.suite == 'network'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -p localname-test -f tests/network/compose.yml up --build --abort-on-container-exit --exit-code-from client
+  whole-home-setup:
+    # A second device takes a DHCP lease from a router that applies only the plan's router
+    # action, then verifies UDP, TCP, and system-resolver resolution (M3a).
+    if: inputs.suite == 'all' || inputs.suite == 'whole-home-setup'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -p localname-setup -f tests/network/setup.yml up --build --abort-on-container-exit --exit-code-from client
+  systemd:
+    if: inputs.suite == 'all' || inputs.suite == 'systemd'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/systemd/run.sh
+  packages:
+    # .deb and .rpm install, upgrade from 0.1.0, reboot, removal, and purge, plus the
+    # container volume upgrade (M5).
+    if: inputs.suite == 'all' || inputs.suite == 'packages'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: tests/packaging/run.sh
+      - run: tests/packaging/container-upgrade.sh
+  router-openwrt:
+    if: inputs.suite == 'all' || inputs.suite == 'router-openwrt'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/router/run.sh
+  https:
+    if: inputs.suite == 'all' || inputs.suite == 'https'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/https/run.sh
+  client-linux:
+    if: inputs.suite == 'all' || inputs.suite == 'client-linux'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/client/linux/run.sh
+  client-macos:
+    if: inputs.suite == 'all' || inputs.suite == 'client-macos'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: tests/client/macos.sh
+  client-windows:
+    if: inputs.suite == 'all' || inputs.suite == 'client-windows'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: tests/client/windows.ps1
+        shell: pwsh
+  daemon-linux:
+    if: inputs.suite == 'all' || inputs.suite == 'daemon-linux'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/daemon/linux.sh
+  daemon-macos:
+    if: inputs.suite == 'all' || inputs.suite == 'daemon-macos'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: tests/daemon/macos.sh
+  daemon-windows:
+    if: inputs.suite == 'all' || inputs.suite == 'daemon-windows'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: tests/daemon/windows.ps1
+        shell: pwsh
+  benchmark:
+    # Budgets: local answers p99 <= 5 ms at a paced 10k queries/s with 10k records, server
+    # RSS <= 64 MiB, release binary <= 10 MiB, zero errors.
+    if: inputs.suite == 'all' || inputs.suite == 'benchmark'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release --bin localname --example benchmark
+      - run: test "$(stat -c %s target/release/localname)" -le 10485760
+      - run: target/release/examples/benchmark
+        env:
+          LOCALNAME_BENCH_BUDGET_P99_MS: "5"
+          LOCALNAME_BENCH_BUDGET_RSS_MB: "64"
+  soak:
+    # 30 minutes of mixed load.
+    if: inputs.suite == 'all' || inputs.suite == 'soak'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release --bin localname --example soak
+      - run: target/release/examples/soak
+        env:
+          LOCALNAME_SOAK_SECONDS: "1800"
+          LOCALNAME_SOAK_BUDGET: "1"

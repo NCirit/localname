@@ -75,18 +75,20 @@ fn plist_text(binary: &Path, config: &Path) -> String {
     )
 }
 
-/// `launchctl print` output: whether the job is running, and its pid.
+/// `launchctl print` output: whether the job is running, and its pid. Nested sections
+/// (endpoints, event triggers) carry their own `state =` lines, so only the first one
+/// describes the job; a pid also means it runs.
 fn parse_print(text: &str) -> (bool, Option<u32>) {
-    let mut running = false;
+    let mut state = None;
     let mut pid = None;
     for line in text.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("state = ") {
-            running = value == "running";
+            state.get_or_insert(value);
         } else if let Some(value) = line.strip_prefix("pid = ") {
-            pid = value.parse().ok();
+            pid = pid.or_else(|| value.parse().ok());
         }
     }
-    (running, pid)
+    (state == Some("running") || pid.is_some(), pid)
 }
 
 /// `launchctl print-disabled system` lists `"label" => disabled` (or `=> true` on older
@@ -272,6 +274,8 @@ mod tests {
         let print = "system/io.github.ncirit.localname = {\n\tactive count = 1\n\tstate = running\n\tpid = 412\n}";
         assert_eq!(parse_print(print), (true, Some(412)));
         assert_eq!(parse_print("\tstate = not running\n"), (false, None));
+        let nested = "\tstate = running\n\tpid = 9\n\tendpoints = {\n\t\tstate = inactive\n\t}\n";
+        assert_eq!(parse_print(nested), (true, Some(9)));
         assert!(parse_disabled(
             "disabled services = {\n\t\"io.github.ncirit.localname\" => disabled\n}"
         ));

@@ -1,167 +1,27 @@
-name: Rust
-# Manual only (Actions > CI > Run workflow); release.yml also calls it.
+name: CI
+# Fast gate, manual only (Actions > CI > Run workflow); release.yml also calls it. One cached
+# Linux job on the MSRV toolchain, with macOS and Windows type checks by cross-target clippy.
+# Heavier suites (Docker, packages, real macOS/Windows hosts) are in integration.yml.
 on: [workflow_dispatch, workflow_call]
 permissions:
   contents: read
 jobs:
-  test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked --all-targets
-      - run: cargo build --locked --release
-  dns-only:
-    # Decision 10: a build without the proxy feature has no HTTP dependencies at all.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - run: "! cargo tree --locked --no-default-features -e normal | grep -E 'hyper|http-body|rustls|ring'"
-      - run: "! cargo tree --locked --no-default-features -F proxy -e normal | grep -E 'rustls|ring|rcgen|acme'"
-      - run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
-      - run: cargo test --locked --no-default-features --all-targets
-  msrv:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
-      - run: cargo check --locked --all-targets
-  agent-skill:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: pip install PyYAML
-      - run: python scripts/validate_skill.py
-  network:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose -p localname-test -f tests/network/compose.yml up --build --abort-on-container-exit --exit-code-from client
-      - if: always()
-        run: docker compose -p localname-test -f tests/network/compose.yml down --volumes
-  whole-home-setup:
-    # A second device takes a DHCP lease from a router that applies only the plan's router
-    # action, then verifies UDP, TCP, and system-resolver resolution (M3a).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose -p localname-setup -f tests/network/setup.yml up --build --abort-on-container-exit --exit-code-from client
-      - if: always()
-        run: docker compose -p localname-setup -f tests/network/setup.yml down --volumes
-  client-linux:
-    # systemd-resolved split DNS with a VPN-like link: apply, reboot, roll back, reboot (M3b).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: tests/client/linux/run.sh
-  client-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: tests/client/macos.sh
-  client-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: tests/client/windows.ps1
-        shell: pwsh
-  router-openwrt:
-    # OpenWrt adapter matrix: changed-state failure, clean and repeated apply, reboot
-    # persistence, rollback, and rollback conflicts against an OpenWrt 24.10 rootfs (M3c).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: tests/router/run.sh
-  https:
-    # ACME DNS-01 against Pebble with strict validation, and the local CA in the Debian
-    # system trust store with confirmed install, removal, and rollback (M4b).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: tests/https/run.sh
-  packages:
-    # .deb and .rpm install, upgrade from 0.1.0 (config schema 1), reboot, removal, and
-    # purge under systemd, plus the container volume upgrade (M5).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - run: tests/packaging/run.sh
-      - run: tests/packaging/container-upgrade.sh
-  soak:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked --release --bin localname --example soak
-      - run: target/release/examples/soak
-        env:
-          LOCALNAME_SOAK_SECONDS: "120"
-          LOCALNAME_SOAK_BUDGET: "1"
-  benchmark:
-    # Performance budgets (see README): local answers p99 <= 5 ms at a paced 10k queries/s
-    # with 10k records, server RSS <= 64 MiB, release binary <= 10 MiB, zero errors.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked --release --bin localname --example benchmark
-      - name: Binary size budget
-        run: test "$(stat -c %s target/release/localname)" -le 10485760
-      - name: Latency and memory budget
-        env:
-          LOCALNAME_BENCH_BUDGET_P99_MS: "5"
-          LOCALNAME_BENCH_BUDGET_RSS_MB: "64"
-        run: target/release/examples/benchmark | tee "benchmark-${{ runner.arch }}.json"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: benchmark-${{ runner.arch }}
-          path: benchmark-*.json
-  systemd:
-    # Boots the packaged unit under systemd, mutates it live and offline, and restarts the
-    # container to check that the enabled service returns with the committed revision.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: tests/systemd/run.sh
-  daemon-linux:
-    # `localname daemon` under systemd: source install, idempotent re-install, kill and
-    # restart, stop and start, reboot persistence, uninstall keeping data, packaged unit (M6).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: tests/daemon/linux.sh
-  daemon-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: tests/daemon/macos.sh
-  daemon-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: tests/daemon/windows.ps1
-        shell: pwsh
+          components: rustfmt, clippy
+          targets: aarch64-apple-darwin, x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      # Decision 10: a DNS-only build has no HTTP or TLS dependencies.
+      - run: "! cargo tree --locked --no-default-features -e normal | grep -E 'hyper|http-body|rustls|ring'"
+      - run: cargo clippy --locked --no-default-features --lib -- -D warnings
+      # Without the TLS stack the other targets need no C cross-compiler.
+      - run: cargo clippy --locked --no-default-features --all-targets --target aarch64-apple-darwin -- -D warnings
+      - run: cargo clippy --locked --no-default-features --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+      - run: pip install --quiet PyYAML && python3 scripts/validate_skill.py

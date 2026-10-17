@@ -52,7 +52,7 @@ test "$code" = 5
 grep -q 'nameserver 10.9.9.9' /etc/resolver/dev.test
 
 # The configuration survives a restart of the system resolver.
-sudo launchctl kickstart -k system/com.apple.mDNSResponder
+sudo killall -HUP mDNSResponder
 for _ in $(seq 1 50); do
     dscacheutil -q host -a name nas.lan | grep -q 192.168.1.20 && break
     sleep 0.2

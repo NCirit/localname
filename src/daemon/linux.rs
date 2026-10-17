@@ -145,12 +145,9 @@ pub fn plan_install(state: &DaemonState, source: &Path) -> Vec<String> {
 pub fn install(state: &DaemonState, source: &Path) -> Result<Vec<String>> {
     let mut steps = Vec::new();
     let mut changed = false;
-    let sysusers;
-    let tmpfiles;
-    if packaged(state) {
+    let (sysusers, tmpfiles) = if packaged(state) {
         steps.push(format!("Using the packaged unit {PACKAGED_UNIT}."));
-        sysusers = "localname.conf";
-        tmpfiles = "localname.conf";
+        ("localname.conf", "localname.conf")
     } else {
         let binary = Path::new(MANAGED_BINARY);
         if !same_contents(source, binary) {
@@ -169,9 +166,8 @@ pub fn install(state: &DaemonState, source: &Path) -> Result<Vec<String>> {
                 changed = true;
             }
         }
-        sysusers = MANAGED_SYSUSERS;
-        tmpfiles = MANAGED_TMPFILES;
-    }
+        (MANAGED_SYSUSERS, MANAGED_TMPFILES)
+    };
     run("systemd-sysusers", &[sysusers])?;
     run("systemd-tmpfiles", &["--create", tmpfiles])?;
     // Setup run as root before the account existed leaves root-owned files behind.

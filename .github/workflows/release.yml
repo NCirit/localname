@@ -1,10 +1,9 @@
 name: Release
 # Manual only: push a tag vX.Y.Z, then run this workflow with "Use workflow from" set to
-# that tag. The tag sets the version (packaging/set-version.sh). It builds, packages, signs, attests, and publishes the release. Every artifact gets
-# a Sigstore bundle (keyless, bound to this workflow) and a SLSA build-provenance
-# attestation; binaries ship with CycloneDX SBOMs and the image with buildx SBOM and
-# provenance. Verify with `cosign verify-blob --bundle FILE.sigstore.json ...` or
-# `gh attestation verify FILE --repo OWNER/localname`.
+# that tag. The tag sets the version (packaging/set-version.sh). It runs the CI gate, builds
+# archives for Linux, macOS, and Windows plus .deb/.rpm packages, and publishes them with
+# SHA256SUMS and a build-provenance attestation (`gh attestation verify FILE --repo
+# OWNER/localname`).
 on: workflow_dispatch
 permissions:
   contents: read
@@ -19,92 +18,54 @@ jobs:
       matrix:
         include:
           # The oldest supported runners keep the glibc requirement low.
-          - {os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, arch: x86_64, packages: true}
-          - {os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, arch: aarch64, packages: true}
-          - {os: macos-14, target: aarch64-apple-darwin, arch: aarch64}
-          - {os: macos-15-intel, target: x86_64-apple-darwin, arch: x86_64}
-          - {os: windows-2022, target: x86_64-pc-windows-msvc, arch: x86_64}
+          - {os: ubuntu-22.04, targets: x86_64-unknown-linux-gnu, arch: x86_64, packages: true}
+          - {os: ubuntu-22.04-arm, targets: aarch64-unknown-linux-gnu, arch: aarch64, packages: true}
+          # One macOS runner builds both architectures.
+          - {os: macos-14, targets: 'aarch64-apple-darwin,x86_64-apple-darwin'}
+          - {os: windows-2022, targets: x86_64-pc-windows-msvc}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
       - name: Set the version from the tag
         shell: bash
         run: packaging/set-version.sh "${GITHUB_REF_NAME#v}"
-      - run: cargo build --locked --release --target ${{ matrix.target }} --bin localname
-      - name: Archive
+      - name: Build and archive
         shell: bash
+        env:
+          TARGETS: ${{ matrix.targets }}
         run: |
           set -eu
           version=${GITHUB_REF_NAME#v}
-          name=localname-$version-${{ matrix.target }}
-          mkdir -p dist "$name"
-          binary=target/${{ matrix.target }}/release/localname
-          [ -f "$binary.exe" ] && binary=$binary.exe
-          cp "$binary" README.md "$name/"
-          cp -r skills packaging/systemd "$name/"
-          if [ "${{ runner.os }}" = Windows ]; then
-            7z a -tzip "dist/$name.zip" "$name" >/dev/null
-          else
-            tar -czf "dist/$name.tar.gz" "$name"
-          fi
+          mkdir -p dist
+          for target in ${TARGETS//,/ }; do
+            cargo build --locked --release --target "$target" --bin localname
+            name=localname-$version-$target
+            mkdir -p "$name"
+            binary=target/$target/release/localname
+            [ -f "$binary.exe" ] && binary=$binary.exe
+            cp "$binary" README.md "$name/"
+            cp -r skills packaging/systemd "$name/"
+            if [ "${{ runner.os }}" = Windows ]; then
+              7z a -tzip "dist/$name.zip" "$name" >/dev/null
+            else
+              tar -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
       - name: Linux packages
         if: matrix.packages
         run: |
-          sudo apt-get update && sudo apt-get install -y rpm
-          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) packaging/build-packages.sh "${GITHUB_REF_NAME#v}" ${{ matrix.arch }} target/${{ matrix.target }}/release/localname dist
-      - name: SBOM
-        shell: bash
-        run: |
-          cargo install cargo-cyclonedx --locked --version 0.5.7
-          cargo cyclonedx --format json --target ${{ matrix.target }} --override-filename "localname-${GITHUB_REF_NAME#v}-${{ matrix.target }}.cdx"
-          mv localname-*.cdx.json dist/
+          sudo apt-get update -q >/dev/null && sudo apt-get install -y -q rpm >/dev/null
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) packaging/build-packages.sh "${GITHUB_REF_NAME#v}" ${{ matrix.arch }} target/${{ matrix.targets }}/release/localname dist
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.target }}
+          name: dist-${{ matrix.os }}
           path: dist/*
-  image:
-    needs: ci
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set the version from the tag
-        run: packaging/set-version.sh "${GITHUB_REF_NAME#v}"
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: runtime
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-          provenance: mode=max
-          sbom: true
-      - uses: sigstore/cosign-installer@v3
-      - run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
-      - uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
   publish:
-    needs: [build, image]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -116,26 +77,12 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: Version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Checksums
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS
-      - uses: sigstore/cosign-installer@v3
-      - name: Sign every artifact
-        working-directory: dist
-        run: |
-          for file in *; do
-            case "$file" in *.sigstore.json) continue ;; esac
-            cosign sign-blob --yes --bundle "$file.sigstore.json" "$file" >/dev/null
-          done
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'dist/*'
-      - uses: actions/attest-sbom@v2
-        with:
-          subject-path: 'dist/*.tar.gz'
-          sbom-path: dist/localname-${{ env.VERSION }}-x86_64-unknown-linux-gnu.cdx.json
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

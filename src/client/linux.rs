@@ -280,7 +280,13 @@ mod tests {
     fn dns_assignments_follow_reset_semantics() {
         let text = "[Resolve]\nDNS=1.1.1.1 9.9.9.9\n#DNS=8.8.8.8\n[Other]\nDNS=5.5.5.5\n";
         assert_eq!(dns_assignments(text), ["1.1.1.1", "9.9.9.9"]);
-        assert!(dns_assignments("[Resolve]\nDNS=1.1.1.1\nDNS=\n").is_empty());
-        assert!(dns_assignments("[Resolve]\n#DNS=\nDomains=lan\n").is_empty());
+        assert_eq!(
+            dns_assignments("[Resolve]\nDNS=1.1.1.1\nDNS=\n"),
+            [] as [&str; 0]
+        );
+        assert_eq!(
+            dns_assignments("[Resolve]\n#DNS=\nDomains=lan\n"),
+            [] as [&str; 0]
+        );
     }
 }

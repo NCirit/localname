@@ -1033,7 +1033,7 @@ ttl = 60
         assert_eq!(config.revision, 4);
         assert!(config.rebind_protection);
         assert!(config.firefox_doh_canary);
-        assert!(config.rebind_allowed_domains.is_empty());
+        assert_eq!(config.rebind_allowed_domains, [] as [String; 0]);
         assert_eq!(config.records.len(), 1);
     }
 

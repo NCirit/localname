@@ -6,7 +6,7 @@
 
 ## Install
 
-**From a release** (Linux x86-64/ARM64 `.deb`/`.rpm`, archives for Linux, macOS, and Windows, or the image `ghcr.io/ncirit/localname`). Each file ships with an SBOM, a SHA-256 checksum, a Sigstore bundle, and a provenance attestation (replace `VERSION`):
+**From a release** (Linux x86-64/ARM64 `.deb`/`.rpm`, and archives for Linux, macOS, and Windows). Releases list SHA-256 checksums in `SHA256SUMS`, and every file has a build-provenance attestation (replace `VERSION`):
 
 ```console
 gh attestation verify localname_VERSION_amd64.deb --repo NCirit/localname
@@ -177,7 +177,7 @@ Other agents can load the same file as instructions, or call `localname skill --
 
 ## Compatibility
 
-From 1.0, localname follows semantic versioning. Within a major version, JSON output (schema version 1) only gains fields, error and exit codes keep their meaning, and commands and flags keep working, with deprecations warned for at least one minor release. Older configurations and backups are migrated automatically; newer ones are refused. Upgrades from 0.1.x or any 1.x by package, binary, or image are supported.
+From 1.0, localname follows semantic versioning. Within a major version, JSON output (schema version 1) only gains fields, error and exit codes keep their meaning, and commands and flags keep working, with deprecations warned for at least one minor release. Older configurations and backups are migrated automatically; newer ones are refused. Upgrades from 0.1.x or any 1.x by package, binary, or container are supported.
 
 **Platforms:** Linux (x86-64, ARM64, systemd), macOS 13+, and Windows 10+. Client split DNS on Linux needs systemd-resolved.
 
@@ -192,4 +192,4 @@ docker compose -f tests/network/setup.yml up --build --abort-on-container-exit -
 tests/packaging/run.sh && tests/packaging/container-upgrade.sh
 ```
 
-CI enforces p99 ≤ 5 ms, server memory ≤ 64 MiB, and binary size ≤ 10 MiB on x86-64 and ARM64. DNS behavior is pinned by `tests/fixtures/conformance.toml`. GitHub workflows run only when started manually (Actions → Run workflow). For a release, push a `vX.Y.Z` tag and run **Release** from that tag.
+GitHub workflows run only when started manually (Actions → Run workflow). **CI** is the fast gate: format, clippy, and tests on Linux, plus macOS and Windows type checks. **Integration** runs one heavy suite, or all of them: Docker networks, packages, router, HTTPS, client and daemon tests on real macOS and Windows hosts, the benchmark (p99 ≤ 5 ms, memory ≤ 64 MiB, binary ≤ 10 MiB), and the soak test. For a release, push a `vX.Y.Z` tag and run **Release** from that tag. DNS behavior is pinned by `tests/fixtures/conformance.toml`.
