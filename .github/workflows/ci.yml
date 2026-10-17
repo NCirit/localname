@@ -145,3 +145,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: tests/systemd/run.sh
+  daemon-linux:
+    # `localname daemon` under systemd: source install, idempotent re-install, kill and
+    # restart, stop and start, reboot persistence, uninstall keeping data, packaged unit (M6).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/daemon/linux.sh
+  daemon-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tests/daemon/macos.sh
+  daemon-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tests/daemon/windows.ps1
+        shell: pwsh

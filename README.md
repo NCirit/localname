@@ -45,7 +45,7 @@ localname setup --apply     # write the configuration
 
 `setup` checks the LAN address, port 53, IPv6, VPNs, the firewall, and current resolvers. For any problem it gives the exact fix (for example, which program holds port 53, or the firewall command to run). After `--apply`:
 
-1. **Start the server:** run `localname serve` once, or install it as a service ([Run at startup](#run-at-startup)).
+1. **Start the server:** run `localname serve`, or install it as a service so it starts at boot ([Run at startup](#run-at-startup)).
 2. **Change the router:** set the DHCP DNS server to the address setup shows and leave the secondary DNS server empty. Setup lists the exact steps.
 3. **Verify from another device:** run `localname setup verify` there, or check that `nslookup localname.lan` returns the server's address.
 
@@ -73,15 +73,24 @@ This uses systemd-resolved on Linux, `/etc/resolver` on macOS, and an NRPT rule 
 
 ## Run at startup
 
-**Linux (packages):** the `.deb`/`.rpm` installs a hardened systemd unit and a `localname` account but leaves the service disabled. Enable it after setup:
+`localname daemon` makes localname a system service that starts at boot and restarts if it fails: systemd on Linux, launchd on macOS, and a Windows service on Windows. The service runs its own copy of the binary and always uses its platform's configuration:
+
+| Platform | Service configuration | Runs as |
+| --- | --- | --- |
+| Linux | `/var/lib/localname/config.toml` | the `localname` account, with only the right to bind port 53 |
+| macOS | `/Library/Application Support/localname/config.toml` | root (macOS reserves port 53 on LAN addresses for root) |
+| Windows | `C:\ProgramData\localname\config.toml` | the `NT SERVICE\localname` virtual account |
 
 ```console
-export LOCALNAME_CONFIG=/var/lib/localname/config.toml
-sudo -E -u localname localname setup --apply
-sudo systemctl enable --now localname
+sudo localname --config /var/lib/localname/config.toml setup --apply   # once, with the path above
+sudo localname daemon install               # preview
+sudo localname daemon install --apply       # install, start, and check that it answers
+localname daemon status
+sudo localname daemon stop                  # also: daemon start
+sudo localname daemon uninstall             # keeps the configuration
 ```
 
-The service keeps only the capability to bind port 53 and stores its data in `/var/lib/localname`. Upgrades restart it. Removing the package keeps the data, and purging deletes it. For a source build, first install the files from `packaging/systemd` (the unit to `/usr/lib/systemd/system/`, `localname.sysusers` and `localname.tmpfiles` to `/usr/lib/sysusers.d/` and `/usr/lib/tmpfiles.d/` as `localname.conf`), then run `sudo systemd-sysusers && sudo systemd-tmpfiles --create`.
+On Windows, run these in an administrator PowerShell without `sudo`. If `sudo` cannot find a binary installed by `cargo install`, use `sudo "$(command -v localname)"`. When you have no configuration of your own, commands such as `sudo localname add` use the service's configuration automatically. After upgrading localname, run `daemon install --apply` again to update the service's copy. The `.deb`/`.rpm` packages already ship the unit; `daemon install --apply` turns it on, upgrades restart it, removing the package keeps the data, and purging deletes it.
 
 **Docker:** `compose.yml` runs a container that restarts automatically, without root or extra capabilities:
 
@@ -91,9 +100,7 @@ docker compose up --build -d
 docker compose exec localname localname --config /var/lib/localname/config.toml add nas 192.168.1.20
 ```
 
-**macOS and Windows:** no service is installed yet. Run `localname serve` yourself.
-
-**Without systemd or root:** grant the binary the capability (`sudo setcap cap_net_bind_service=+ep "$(command -v localname)"`), or start it as root with `localname serve --user localname`. It drops to that account after binding port 53.
+**Without a service manager:** grant the binary the capability (`sudo setcap cap_net_bind_service=+ep "$(command -v localname)"`), or start it as root with `localname serve --user localname`. It drops to that account after binding port 53.
 
 ## Managing names
 

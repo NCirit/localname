@@ -49,7 +49,7 @@ struct DiagnoseData {
 }
 
 /// Query the zone SOA from the first listener. Healthy means an authoritative positive answer.
-async fn probe(config: &Config) -> (bool, String, Value) {
+pub(crate) async fn probe(config: &Config) -> (bool, String, Value) {
     match query_server(
         first_listener(config),
         &config.zone,

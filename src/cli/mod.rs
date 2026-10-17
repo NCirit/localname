@@ -1,5 +1,6 @@
 mod backup;
 mod client;
+mod daemon;
 mod health;
 #[cfg(feature = "https")]
 mod https;
@@ -112,6 +113,11 @@ enum Command {
         #[command(subcommand)]
         command: backup::BackupCommand,
     },
+    /// Run localname as a system service that starts at boot and restarts on failure.
+    Daemon {
+        #[command(subcommand)]
+        command: daemon::DaemonCommand,
+    },
     /// Validate configuration.
     Config {
         #[command(subcommand)]
@@ -189,6 +195,12 @@ pub(crate) struct ReportedError {
 /// Parse arguments, run the command, and render errors in the selected format.
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Daemon {
+        command: daemon::DaemonCommand::Run,
+    } = cli.command
+    {
+        return daemon::run_service(cli.config.clone());
+    }
     // The service gets a small worker pool; one-shot commands need only one thread.
     let runtime = if matches!(cli.command, Command::Serve(_)) {
         tokio::runtime::Builder::new_multi_thread()
@@ -340,6 +352,7 @@ async fn execute(cli: Cli, store: ConfigStore) -> Result<()> {
         Command::Client { command } => client::run(output, &command).await,
         Command::Router { command } => router::run(output, non_interactive, &store, command).await,
         Command::Backup { command } => backup::run(output, &store, &command),
+        Command::Daemon { command } => daemon::run(output, &store, command).await,
         Command::Config { command } => config_command(output, &store, command),
     }
 }
@@ -362,17 +375,6 @@ pub fn command_reference() -> Vec<Value> {
 }
 
 async fn serve(store: ConfigStore, args: ServeArgs) -> Result<()> {
-    let config = store.load()?;
-    let listeners = crate::Listeners::bind_config(&config).await?;
-    if let Some(user) = &args.user {
-        crate::privilege::drop_to(user)?;
-        tracing::info!(%user, "dropped root privileges after binding listeners");
-    } else if crate::privilege::is_root() {
-        tracing::warn!(
-            "running as root; use --user, a service account with CAP_NET_BIND_SERVICE, or an unprivileged port"
-        );
-    }
-    let server = DnsServer::new(store, config)?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
         #[cfg(unix)]
@@ -392,7 +394,29 @@ async fn serve(store: ConfigStore, args: ServeArgs) -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = shutdown_tx.send(true);
     });
-    server.run_with(listeners, shutdown_rx).await
+    serve_until(store, args.user.as_deref(), shutdown_rx, || {}).await
+}
+
+/// Bind the listeners, drop privileges, call `ready`, and serve until `shutdown` fires.
+pub(crate) async fn serve_until(
+    store: ConfigStore,
+    user: Option<&str>,
+    shutdown: watch::Receiver<bool>,
+    ready: impl FnOnce(),
+) -> Result<()> {
+    let config = store.load()?;
+    let listeners = crate::Listeners::bind_config(&config).await?;
+    if let Some(user) = user {
+        crate::privilege::drop_to(user)?;
+        tracing::info!(%user, "dropped root privileges after binding listeners");
+    } else if crate::privilege::is_root() {
+        tracing::warn!(
+            "running as root; use --user, a service account with CAP_NET_BIND_SERVICE, or an unprivileged port"
+        );
+    }
+    let server = DnsServer::new(store, config)?;
+    ready();
+    server.run_with(listeners, shutdown).await
 }
 
 fn config_command(output: OutputFormat, store: &ConfigStore, command: ConfigCommand) -> Result<()> {
@@ -452,14 +476,21 @@ where
     Ok(())
 }
 
+/// `LOCALNAME_CONFIG`, else this user's configuration if it exists, else the installed
+/// service's configuration if this account can see it, else this user's path.
 fn default_config_path() -> PathBuf {
     if let Some(path) = env::var_os("LOCALNAME_CONFIG") {
         return path.into();
     }
-    dirs::config_dir()
+    let user = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("localname")
-        .join("config.toml")
+        .join("config.toml");
+    let service = crate::daemon::service_config_path();
+    if !user.exists() && service.exists() {
+        return service;
+    }
+    user
 }
 
 pub(crate) fn check_revision(expected: Option<u64>, current: u64) -> Result<()> {

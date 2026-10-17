@@ -6,6 +6,7 @@ COPY src ./src
 COPY schemas ./schemas
 COPY skills ./skills
 COPY examples ./examples
+COPY packaging/systemd ./packaging/systemd
 RUN --mount=type=cache,id=localname-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=localname-target-${TARGETPLATFORM},target=/build/target \
     cargo build --locked --release --bin localname --example network_probe \

@@ -24,6 +24,7 @@ Names follow zone-file rules: `printer.office` → `printer.office.lan.`; an ext
 - Claim whole-network integration only after `localname setup verify` passes on a second device. On the server itself the scope is `this_host`.
 - OpenWrt: `localname router plan --host ROUTER`, show `changes`, then after approval `router apply --host ROUTER --expect-state FINGERPRINT`. CONFLICT means re-plan. Never ask for router passwords; pass `--accept-new-host-key` only if the user says the network is trusted.
 - Per-device fallback: `localname client setup --server ADDR` previews; `--apply` needs root or admin. The `preserved` check must pass. `client rollback` undoes it, and a foreign zone config is never overwritten.
+- Start at boot: `localname daemon install` previews `data.checks` and `data.steps`; after the user approves, run `daemon install --apply` (root or admin). The service only uses `data.state.config`; if that's missing, create it with `setup --apply --config PATH` first. `localname daemon status` reports `enabled`, `running`, and `dns.healthy`. `daemon uninstall` keeps the configuration.
 - On failures, run `localname diagnose` before changing anything.
 - Router, DHCP, OS resolver, firewall, and trust-store changes need the user's approval for the exact target. Keep `.local` for mDNS. Keep VPN and enterprise DNS as they are.
 

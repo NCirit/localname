@@ -7,6 +7,7 @@ COPY src ./src
 COPY schemas ./schemas
 COPY skills ./skills
 COPY examples ./examples
+COPY packaging/systemd ./packaging/systemd
 RUN --mount=type=cache,id=localname-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=localname-router-target,target=/build/target \
     cargo build --locked --release --bin localname && cp target/release/localname /build/localname

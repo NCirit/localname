@@ -58,6 +58,9 @@ must_use_candidate = "allow"
 [target."cfg(unix)".dependencies]
 nix = { version = "0.30", default-features = false, features = ["user", "fs"] }
 
+[target."cfg(windows)".dependencies]
+windows-service = "0.8.1"
+
 [features]
 default = ["proxy", "https"]
 # HTTP/WebSocket service proxy (decision 10: optional; DNS-only builds omit it).
