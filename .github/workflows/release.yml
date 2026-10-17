@@ -1,16 +1,16 @@
 name: Release
-# Tag vX.Y.Z to build, package, sign, attest, and publish a release. Every artifact gets
+# Manual only: push a tag vX.Y.Z, then run this workflow with "Use workflow from" set to
+# that tag. It builds, packages, signs, attests, and publishes the release. Every artifact gets
 # a Sigstore bundle (keyless, bound to this workflow) and a SLSA build-provenance
 # attestation; binaries ship with CycloneDX SBOMs and the image with buildx SBOM and
 # provenance. Verify with `cosign verify-blob --bundle FILE.sigstore.json ...` or
 # `gh attestation verify FILE --repo OWNER/localname`.
-on:
-  push:
-    tags: ['v*']
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
   ci:
+    if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/ci.yml
   build:
     needs: ci

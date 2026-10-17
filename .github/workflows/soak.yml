@@ -1,9 +1,6 @@
 name: Soak
-# Sustained reliability: 30 minutes of mixed load every night on both architectures.
-on:
-  schedule:
-    - cron: '17 3 * * *'
-  workflow_dispatch:
+# Sustained reliability: 30 minutes of mixed load on both architectures. Manual only.
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:

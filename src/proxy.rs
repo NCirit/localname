@@ -2,7 +2,7 @@
 //! `proxy_listen` is configured; in DNS-only mode no listener, task, or HTTP state is
 //! created. Requests are routed by `Host` to the service's backend.
 //!
-//! Backend failure behavior (documented in the README):
+//! Backend failure behavior:
 //! - unknown `Host`: 404; missing `Host`: 400; client outside `allowed_clients`: 403
 //! - backend refuses or resets the connection: 502 Bad Gateway
 //! - backend does not accept the connection within 5 s, or send response headers within

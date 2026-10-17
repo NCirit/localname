@@ -1,5 +1,6 @@
 name: Rust
-on: [push, pull_request, workflow_call]
+# Manual only (Actions > CI > Run workflow); release.yml also calls it.
+on: [workflow_dispatch, workflow_call]
 permissions:
   contents: read
 jobs:
